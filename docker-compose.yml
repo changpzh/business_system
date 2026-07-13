@@ -1,0 +1,19 @@
+services:
+  aps-business:
+    build: .
+    container_name: aps-business
+    ports:
+      - "8080:8080"
+    environment:
+      ALGORITHM_BASE_URL: ${ALGORITHM_BASE_URL:-http://host.docker.internal:8000}
+      ALGORITHM_TIMEOUT_SECONDS: ${ALGORITHM_TIMEOUT_SECONDS:-600}
+      FACTORY_CODE: ${FACTORY_CODE:-FACTORY01}
+      SESSION_SECRET: ${SESSION_SECRET:-replace-this-before-production}
+    volumes:
+      - aps_business_data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  aps_business_data:

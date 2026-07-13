@@ -1,0 +1,493 @@
+# APS 业务系统部署手册
+
+文档版本：1.0  
+适用系统：`business_system`  
+默认 HTTP 端口：8080  
+默认数据库：SQLite
+
+## 1. 系统组成
+
+业务系统是可整体复制、独立运行的应用，不导入算法项目代码。运行时通过 HTTP 调用算法系统。
+
+| 组件 | 位置 | 职责 |
+|---|---|---|
+| FastAPI 后端 | `business_app/` | 权限、主数据、任务、版本、审批发布 |
+| Web 前端 | `business_app/static/` | 浏览器业务界面，无需 Node 构建 |
+| SQLite | `data/business.db` | 用户、主数据、任务、版本、审计日志 |
+| 演示数据 | `seed/demo_snapshot.json` | 空库首次启动时自动初始化 |
+| 算法适配器 | `business_app/algorithm_client.py` | 调用算法 HTTP API |
+
+## 2. 部署边界
+
+业务系统负责：
+
+- 用户、角色和访问控制；
+- 订单、工序、设备、人员、资源组和日历；
+- 一致数据快照；
+- 排程任务和唯一 `task_id`；
+- 算法结果、计划版本、审批、发布和回写；
+- 审计日志。
+
+业务系统不包含算法引擎。部署前必须准备可访问的算法 HTTP 地址。
+
+## 3. 环境要求
+
+### 3.1 软件
+
+- Python 3.12；
+- pip 23 或更高版本；
+- 现代浏览器：Edge、Chrome 或 Firefox；
+- Docker 24 与 Compose v2，仅容器部署需要；
+- Nginx、Caddy 或企业 API 网关，生产环境建议使用。
+
+### 3.2 资源
+
+| 场景 | CPU | 内存 | 磁盘 |
+|---|---:|---:|---:|
+| 开发或演示 | 1 核 | 1 GB | 2 GB |
+| 单工厂生产 | 2 核 | 4 GB | 20 GB |
+| 主数据和版本较多 | 4 核 | 8 GB | 50 GB 以上 |
+
+业务系统本身计算量较小，排程计算由算法服务完成。磁盘容量主要取决于任务快照和结果版本数量。
+
+### 3.3 网络
+
+| 来源 | 目标 | 默认端口 | 说明 |
+|---|---|---:|---|
+| 用户浏览器 | 业务系统 | 8080 或 HTTPS 443 | Web 与 API |
+| 业务系统 | 算法系统 | 8000 | 排程调用、健康检查 |
+| 算法 Worker | 业务系统 | 8080/443 | 可选异步回调 |
+
+## 4. 获取与复制部署包
+
+只复制整个 `business_system` 目录即可：
+
+```text
+business_system/
+├── business_app/
+├── seed/
+├── tests/
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── start.ps1
+└── start.sh
+```
+
+复制后不要包含原开发环境的 `.venv`、`data/*.db` 和日志文件。目标服务器应重新创建虚拟环境。
+
+## 5. 环境变量
+
+参考 `.env.example`：
+
+| 变量 | 默认值 | 生产要求 |
+|---|---|---|
+| `APP_NAME` | `APS 生产排程业务系统` | 可选 |
+| `DATABASE_PATH` | `<业务目录>/data/business.db` | 使用绝对路径更稳妥 |
+| `ALGORITHM_BASE_URL` | `http://127.0.0.1:8000` | 必须指向实际算法 API |
+| `ALGORITHM_TIMEOUT_SECONDS` | `600` | 按最大任务耗时设置 |
+| `FACTORY_CODE` | `FACTORY01` | 修改为真实工厂编码 |
+| `SESSION_SECRET` | 开发默认值 | 必须使用强随机密钥 |
+| `SESSION_HOURS` | `12` | 按安全要求设置 |
+| `CORS_ORIGINS` | 本机 8080 地址 | 使用逗号分隔的可信来源 |
+
+生成随机会话密钥：
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`SESSION_SECRET` 变更后，现有登录令牌全部失效。
+
+## 6. Windows 部署
+
+### 6.1 安装
+
+```powershell
+cd E:\deploy\business_system
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### 6.2 配置
+
+```powershell
+$env:DATABASE_PATH="E:\aps-data\business.db"
+$env:ALGORITHM_BASE_URL="http://10.0.0.20:8000"
+$env:FACTORY_CODE="FACTORY01"
+$env:SESSION_SECRET="使用随机生成的长密钥"
+$env:CORS_ORIGINS="https://aps.example.com"
+```
+
+PowerShell 设置只对当前终端有效。注册 Windows 服务时，应把这些变量配置到服务环境中。
+
+### 6.3 启动
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn business_app.main:app `
+  --host 0.0.0.0 `
+  --port 8080 `
+  --workers 1
+```
+
+也可执行：
+
+```powershell
+.\start.ps1
+```
+
+`start.ps1` 每次启动都会检查虚拟环境并执行依赖安装，更适合开发和首次部署。生产服务建议直接使用上面的 uvicorn 命令。
+
+### 6.4 注册 Windows 服务
+
+以 NSSM 为例：
+
+```powershell
+nssm install aps-business "E:\deploy\business_system\.venv\Scripts\python.exe"
+nssm set aps-business AppDirectory "E:\deploy\business_system"
+nssm set aps-business AppParameters "-m uvicorn business_app.main:app --host 0.0.0.0 --port 8080 --workers 1"
+nssm set aps-business AppEnvironmentExtra `
+  DATABASE_PATH=E:\aps-data\business.db `
+  ALGORITHM_BASE_URL=http://10.0.0.20:8000 `
+  FACTORY_CODE=FACTORY01 `
+  SESSION_SECRET=替换为随机密钥 `
+  CORS_ORIGINS=https://aps.example.com
+nssm set aps-business Start SERVICE_AUTO_START
+nssm start aps-business
+```
+
+## 7. Linux 部署
+
+### 7.1 安装
+
+```bash
+sudo useradd --system --create-home --shell /usr/sbin/nologin aps-business
+sudo mkdir -p /opt/aps/business /var/lib/aps-business /etc/aps
+sudo chown -R aps-business:aps-business /opt/aps/business /var/lib/aps-business
+
+cd /opt/aps/business
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
+```
+
+### 7.2 环境文件
+
+创建 `/etc/aps/business.env`：
+
+```text
+APP_NAME=APS 生产排程业务系统
+DATABASE_PATH=/var/lib/aps-business/business.db
+ALGORITHM_BASE_URL=http://algorithm.internal:8000
+ALGORITHM_TIMEOUT_SECONDS=600
+FACTORY_CODE=FACTORY01
+SESSION_SECRET=replace-with-generated-secret
+SESSION_HOURS=12
+CORS_ORIGINS=https://aps.example.com
+```
+
+```bash
+sudo chown root:aps-business /etc/aps/business.env
+sudo chmod 640 /etc/aps/business.env
+```
+
+### 7.3 systemd
+
+创建 `/etc/systemd/system/aps-business.service`：
+
+```ini
+[Unit]
+Description=APS Business System
+After=network.target
+
+[Service]
+Type=simple
+User=aps-business
+Group=aps-business
+WorkingDirectory=/opt/aps/business
+EnvironmentFile=/etc/aps/business.env
+ExecStart=/opt/aps/business/.venv/bin/python -m uvicorn business_app.main:app --host 127.0.0.1 --port 8080 --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now aps-business
+sudo systemctl status aps-business
+journalctl -u aps-business -f
+```
+
+## 8. Docker 部署
+
+### 8.1 Compose 启动
+
+业务系统目录内执行：
+
+```bash
+export ALGORITHM_BASE_URL='http://algorithm-host:8000'
+export FACTORY_CODE='FACTORY01'
+export SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+docker compose up --build -d
+```
+
+访问：
+
+```text
+http://服务器地址:8080
+```
+
+默认使用命名卷 `aps_business_data` 保存数据库。删除容器不会删除数据库，执行 `docker compose down -v` 会删除命名卷和数据，生产环境禁止随意使用 `-v`。
+
+### 8.2 容器检查
+
+```bash
+docker compose ps
+docker compose logs -f aps-business
+docker inspect aps-business --format '{{json .State.Health}}'
+```
+
+### 8.3 算法服务地址
+
+默认 Compose 使用：
+
+```text
+http://host.docker.internal:8000
+```
+
+Linux 已通过 `extra_hosts` 映射宿主机地址。如果算法服务在其他容器或服务器，显式设置 `ALGORITHM_BASE_URL`。不要在容器中使用 `127.0.0.1:8000` 访问宿主机算法服务。
+
+## 9. 首次启动与初始化
+
+首次启动时系统自动：
+
+1. 创建 SQLite 数据库和表；
+2. 创建初始管理员；
+3. 当 `master_records` 为空时导入 `seed/demo_snapshot.json`；
+4. 把上次异常中断的 `QUEUED / RUNNING` 任务标记为失败，允许人工重试。
+
+初始账号：
+
+```text
+用户名：admin
+密码：admin123
+```
+
+首次部署必须：
+
+1. 登录系统；
+2. 修改管理员密码；
+3. 创建计划员和审批人账号；
+4. 导入正式主数据；
+5. 校验数据快照；
+6. 测试算法连接；
+7. 完成试算、审批和发布验收。
+
+如果不需要演示数据，应在正式上线前通过界面删除或使用正式快照覆盖，并再次执行快照校验。
+
+## 10. Nginx 与 HTTPS
+
+示例：
+
+```nginx
+upstream aps_business {
+    server 127.0.0.1:8080;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name aps.example.com;
+
+    ssl_certificate /etc/nginx/certs/aps.crt;
+    ssl_certificate_key /etc/nginx/certs/aps.key;
+    client_max_body_size 50m;
+    proxy_read_timeout 900s;
+
+    location / {
+        proxy_pass http://aps_business;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+将 `CORS_ORIGINS` 设置为最终 HTTPS 地址，不要使用 `*`。
+
+## 11. SQLite 运维
+
+### 11.1 单实例限制
+
+当前业务系统适合单实例部署：
+
+- SQLite 已启用 WAL；
+- uvicorn 应使用 `--workers 1`；
+- 不要让多个容器或多台服务器同时写同一个 SQLite 文件；
+- 后台任务由进程内 BackgroundTasks 执行，服务重启时运行中任务会失败并需要重试。
+
+需要多实例时，应先迁移 PostgreSQL 和独立任务队列，不能只增加 uvicorn Worker 数量。
+
+### 11.2 在线备份
+
+推荐使用 Python 标准库的 SQLite Backup API：
+
+```bash
+python -c "import sqlite3; src=sqlite3.connect('/var/lib/aps-business/business.db'); dst=sqlite3.connect('/backup/business-$(date +%Y%m%d).db'); src.backup(dst); dst.close(); src.close()"
+```
+
+Windows PowerShell：
+
+```powershell
+$date = Get-Date -Format yyyyMMdd-HHmmss
+.\.venv\Scripts\python.exe -c "import sqlite3; src=sqlite3.connect(r'E:\aps-data\business.db'); dst=sqlite3.connect(r'E:\backup\business-$date.db'); src.backup(dst); dst.close(); src.close()"
+```
+
+同时备份：
+
+- 当前发布包；
+- 环境变量配置；
+- `SESSION_SECRET` 的安全存储副本；
+- 反向代理配置。
+
+### 11.3 停机备份
+
+停止服务后复制 `business.db`。若数据库目录中存在 `business.db-wal` 和 `business.db-shm`，必须在停止服务并确认进程退出后再复制，或使用在线备份 API，不能只复制主文件。
+
+### 11.4 恢复
+
+1. 停止业务系统；
+2. 备份当前故障数据库；
+3. 把备份文件恢复到 `DATABASE_PATH`；
+4. 确认文件所有者和权限；
+5. 启动服务；
+6. 登录检查用户、主数据、任务和版本；
+7. 执行一次快照校验和算法连接检查。
+
+## 12. 日志与监控
+
+当前应用日志输出到标准输出，数据库中的 `audit_logs` 保存业务操作审计。
+
+建议监控：
+
+- `GET /health`；
+- 登录失败率；
+- 算法连接状态；
+- `QUEUED / RUNNING / FAILED` 任务数量；
+- SQLite 文件大小和磁盘剩余空间；
+- API 5xx；
+- 后台任务平均耗时；
+- 版本审批和发布数量；
+- 数据库备份是否成功。
+
+生产环境建议由 systemd、Docker 或日志采集平台保存标准输出并设置保留策略。
+
+## 13. 升级步骤
+
+### 13.1 升级前
+
+1. 通知用户停止创建任务和发布版本；
+2. 等待运行中任务完成；
+3. 执行数据库在线备份；
+4. 备份环境配置与当前代码；
+5. 记录当前版本和依赖；
+6. 在测试环境运行自动化测试。
+
+### 13.2 升级
+
+```bash
+sudo systemctl stop aps-business
+cd /opt/aps/business
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m compileall business_app
+./.venv/bin/python -m unittest discover -s tests -v
+sudo systemctl start aps-business
+```
+
+启动时会执行幂等建表。当前项目没有独立数据库迁移工具，因此任何涉及已有字段变更的未来版本，都必须附带专用迁移脚本和回滚说明。
+
+### 13.3 回滚
+
+1. 停止新版本；
+2. 恢复上一版本代码和依赖；
+3. 如果升级修改了数据库结构，恢复升级前数据库备份；
+4. 使用原 `SESSION_SECRET`，避免无必要的令牌失效；
+5. 启动服务并执行验收。
+
+## 14. 部署验收
+
+### 14.1 健康检查
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+期望：
+
+```json
+{"status":"UP","component":"business-system","version":"1.0.0"}
+```
+
+### 14.2 自动化测试
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+### 14.3 人工验收
+
+- [ ] 初始管理员可登录并已修改密码；
+- [ ] 能创建计划员和审批人；
+- [ ] 正式主数据导入成功；
+- [ ] “校验快照”返回通过；
+- [ ] 算法服务显示 `UP`；
+- [ ] 可完成一次快速排程；
+- [ ] 成功生成草稿版本；
+- [ ] 审批、发布和工序回写正确；
+- [ ] 版本对比可用；
+- [ ] 审计日志包含关键操作；
+- [ ] 数据库备份和恢复演练通过。
+
+## 15. 常见故障
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 页面无法打开 | 服务未启动、端口或代理错误 | 检查 `/health`、服务日志和防火墙 |
+| 登录失败 | 密码错误、用户停用、令牌过期 | 管理员重置密码或启用用户 |
+| 算法服务显示 DOWN | 地址、网络、算法进程 | 检查 `ALGORITHM_BASE_URL` 和算法 `/health` |
+| 提交任务立即失败 | 快照校验不通过 | 在主数据中心执行校验并修复引用 |
+| 任务一直 RUNNING | 算法耗时或连接未返回 | 检查算法日志和超时设置 |
+| 服务重启后任务 FAILED | 进程内后台任务中断 | 使用原 `task_id` 重试 |
+| 发布按钮不可用 | 版本未审批 | 先由 approver/admin 审批通过 |
+| SQLite locked | 多进程或多实例写入 | 恢复单实例、`--workers 1` |
+| 磁盘增长过快 | 快照和结果版本累积 | 备份后制定任务与旧版本归档策略 |
+
+## 16. 安全清单
+
+- 必须修改默认管理员密码；
+- 必须修改 `SESSION_SECRET`；
+- 使用 HTTPS；
+- 业务系统和算法系统优先部署在内网；
+- CORS 仅允许真实业务域名；
+- 数据库、备份和环境文件限制操作系统权限；
+- 异步回调入口应由内网、网关或额外签名保护；
+- 当前应用没有内置登录锁定和限流，生产环境应由网关增加限流和异常登录防护；
+- 定期检查管理员账号、停用离职账号；
+- 定期审查审批、发布、主数据变更和用户变更日志。
+
+## 17. 下线
+
+1. 停止创建任务；
+2. 等待运行任务结束；
+3. 导出当前数据快照；
+4. 备份数据库和配置；
+5. 停止服务；
+6. 归档日志和部署包；
+7. 关闭网络入口；
+8. 按数据保留制度销毁或长期保存数据库备份。
+

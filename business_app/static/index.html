@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>APS 生产排程业务系统</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=20260713-8">
+</head>
+<body>
+  <div id="loginView" class="login-page">
+    <section class="login-brand">
+      <div class="brand-mark large">APS</div>
+      <p class="eyebrow">ADVANCED PLANNING & SCHEDULING</p>
+      <h1>让复杂制造计划<br>变得清晰可控</h1>
+      <p class="login-copy">统一管理订单、资源与工厂日历，连接智能排程算法，完成试算、审批、发布与计划回写。</p>
+      <div class="feature-strip"><span>主数据快照</span><span>智能排程</span><span>版本治理</span><span>生产发布</span></div>
+    </section>
+    <section class="login-panel">
+      <form id="loginForm" class="login-card">
+        <p class="eyebrow dark">WELCOME BACK</p>
+        <h2>登录业务系统</h2>
+        <p class="muted">首次启动可使用 admin / admin123</p>
+        <label>用户名<input name="username" value="admin" autocomplete="username" required></label>
+        <label>密码<input name="password" type="password" value="admin123" autocomplete="current-password" required></label>
+        <button class="button primary wide" type="submit">进入系统</button>
+        <p id="loginError" class="form-error"></p>
+      </form>
+    </section>
+  </div>
+
+  <div id="appView" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">APS</div><div><strong>智能排程</strong><small>业务管理平台</small></div></div>
+      <nav id="nav">
+        <button data-page="dashboard" class="active"><span>◫</span>总览中心</button>
+        <button data-page="tasks"><span>↗</span>排程任务</button>
+        <button data-page="versions"><span>▤</span>计划版本</button>
+        <button data-page="effective"><span>▥</span>生效排程</button>
+        <button data-page="master"><span>◇</span>主数据中心</button>
+        <button data-page="users"><span>◎</span>用户与权限</button>
+        <button data-page="audit"><span>⌁</span>审计日志</button>
+      </nav>
+      <div class="sidebar-foot"><div id="userBadge" class="user-badge"></div><button id="logoutBtn" class="text-button">退出登录</button></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div><p id="pageEyebrow" class="eyebrow dark">OPERATIONS CENTER</p><h2 id="pageTitle">生产运营总览</h2></div><div class="top-actions"><span id="clock"></span><button id="quickTask" class="button primary">＋ 新建排程</button></div></header>
+      <div id="content" class="content"><div class="loading">正在加载…</div></div>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden"><div class="modal-backdrop" data-close-modal></div><section class="modal-card"><header><h3 id="modalTitle"></h3><button data-close-modal>×</button></header><div id="modalBody" class="modal-body"></div></section></div>
+  <div id="ganttTooltip" class="gantt-tooltip hidden"></div>
+  <div id="lockInfoOverlay" class="lock-info-overlay hidden" onclick="if(event.target===this)closeLockInfo()"><section class="lock-info-card"><header><div><small>LOCK DETAILS</small><h3>工序锁定信息</h3></div><button type="button" onclick="closeLockInfo()">×</button></header><div id="lockInfoBody" class="lock-info-body"></div></section></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/assets/app.js?v=20260713-9"></script>
+</body>
+</html>
