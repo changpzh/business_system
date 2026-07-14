@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,7 +15,7 @@ from .algorithm_client import algorithm_client
 from .config import BASE_DIR, settings
 from .database import audit, db, initialize_database, now_text
 from .security import create_token, decode_token, verify_password
-from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, create_task, execute_task, parse_json_columns, publish_version, save_task_result, validate_snapshot
+from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, create_task, execute_task, is_manually_locked, lock_process, parse_json_columns, publish_version, save_task_result, unlock_process, validate_snapshot
 
 
 @asynccontextmanager
@@ -203,6 +204,36 @@ def effective_schedule(
         )
 
 
+@app.post("/api/processes/{process_id}/lock")
+def manually_lock_process(
+    process_id: str,
+    payload: dict[str, Any],
+    user: dict[str, Any] = Depends(require_roles("admin", "planner")),
+) -> dict[str, Any]:
+    try:
+        return lock_process(process_id, payload, user["username"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 409 if "已变化" in str(exc) or "人工资源锁冲突" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@app.delete("/api/processes/{process_id}/lock")
+def manually_unlock_process(
+    process_id: str,
+    payload: dict[str, Any],
+    user: dict[str, Any] = Depends(require_roles("admin", "planner")),
+) -> dict[str, Any]:
+    try:
+        return unlock_process(process_id, payload, user["username"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 409 if "已变化" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @app.get("/api/master-data/snapshot")
 def snapshot(_: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     with db() as connection:
@@ -336,6 +367,12 @@ def submit_task(payload: dict[str, Any], background_tasks: BackgroundTasks, user
         raise HTTPException(status_code=422, detail="mode 不合法")
     if payload.get("mode") == "local" and not payload.get("local_adjustments"):
         raise HTTPException(status_code=422, detail="局部微调必须提供 local_adjustments")
+    if not payload.get("schedule_start"):
+        raise HTTPException(status_code=422, detail="schedule_start 为必填字段")
+    try:
+        datetime.fromisoformat(str(payload["schedule_start"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="schedule_start 必须是 ISO 日期时间") from exc
     try:
         task_id = create_task(payload, user["username"])
     except Exception as exc:
@@ -445,7 +482,7 @@ def get_version(version_id: str, _: dict[str, Any] = Depends(current_user)) -> d
         if "material_ready_time" not in item:
             item["material_ready_time"] = source.get("material_ready_time") or ""
         source_locks = source.get("locks") or {}
-        item["manually_locked"] = bool(source_locks)
+        item["manually_locked"] = is_manually_locked(source)
         item["lock_details"] = source_locks
         item["source_process_status"] = source.get("status") or item.get("source_status") or ""
         effective_version_id = str(current.get("schedule_version_id") or "")

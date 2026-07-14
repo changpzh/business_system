@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,12 @@ from fastapi.testclient import TestClient
 
 from business_app.algorithm_client import algorithm_client
 from business_app.main import app
+from business_app.services import (
+    _detect_schedule_conflicts,
+    _restore_batch_metadata_from_history,
+    _sync_batch_metadata,
+    is_manually_locked,
+)
 
 
 class BusinessSystemTests(unittest.TestCase):
@@ -89,6 +97,95 @@ class BusinessSystemTests(unittest.TestCase):
         invalid = self.client.post("/api/master-data/machine/batch", json={}, headers=self.headers)
         self.assertEqual(invalid.status_code, 422)
 
+    def test_historical_batch_metadata_is_restored_for_rolling_snapshot(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE schedule_versions(version_no INTEGER, result_json TEXT)")
+        batch_id = "BATCH_P1_P2"
+        batch_tasks = [
+            {
+                "process_id": process_id,
+                "machine_id": "FURNACE_01",
+                "worker_id": "WORKER_01",
+                "plan_start_time": "2026-07-14T08:00:00",
+                "plan_end_time": "2026-07-14T12:00:00",
+                "batch_id": batch_id,
+                "batch_merged": True,
+                "batch_member_count": 2,
+                "batch_process_ids": ["P1", "P2"],
+            }
+            for process_id in ("P1", "P2")
+        ]
+        connection.execute(
+            "INSERT INTO schedule_versions(version_no,result_json) VALUES(?,?)",
+            (1, json.dumps({"schedule": batch_tasks})),
+        )
+        snapshot = {
+            "order_processes": [
+                {
+                    "order_id": "O1",
+                    "processes": [
+                        {
+                            "process_id": process_id,
+                            "assigned_machine_id": "FURNACE_01",
+                            "assigned_worker_id": "WORKER_01",
+                            "plan_start_time": "2026-07-14T08:00:00",
+                            "plan_end_time": "2026-07-14T12:00:00",
+                        }
+                        for process_id in ("P1", "P2")
+                    ],
+                }
+            ]
+        }
+
+        _restore_batch_metadata_from_history(connection, snapshot)
+
+        processes = snapshot["order_processes"][0]["processes"]
+        self.assertEqual({process["batch_id"] for process in processes}, {batch_id})
+        conflict_rows = [
+            {
+                **process,
+                "machine_id": process["assigned_machine_id"],
+                "worker_id": process["assigned_worker_id"],
+            }
+            for process in processes
+        ]
+        self.assertEqual(_detect_schedule_conflicts(conflict_rows), [])
+        connection.close()
+
+    def test_publishing_schedule_replaces_or_clears_batch_metadata(self) -> None:
+        process = {"process_id": "P1", "batch_id": "OLD_BATCH", "batch_merged": True}
+        _sync_batch_metadata(
+            process,
+            {
+                "process_id": "P1",
+                "batch_id": "NEW_BATCH",
+                "batch_merged": True,
+                "batch_member_count": 2,
+            },
+        )
+        self.assertEqual(process["batch_id"], "NEW_BATCH")
+        self.assertEqual(process["batch_member_count"], 2)
+
+        _sync_batch_metadata(process, {"process_id": "P1"})
+        self.assertNotIn("batch_id", process)
+        self.assertNotIn("batch_merged", process)
+
+    def test_only_nonempty_locks_are_reported_as_manual_lock(self) -> None:
+        self.assertFalse(is_manually_locked({"locks": {}}))
+        self.assertTrue(
+            is_manually_locked(
+                {
+                    "locks": {
+                        "machine_id": "FURNACE_01",
+                        "lock_time": "2026-07-14T07:00:00",
+                        "operator": "planner",
+                        "lock_reason": "人工指定设备",
+                    }
+                }
+            )
+        )
+
     def test_task_version_review_and_publish_workflow(self) -> None:
         original_execute = algorithm_client.execute
 
@@ -120,7 +217,12 @@ class BusinessSystemTests(unittest.TestCase):
         try:
             created = self.client.post(
                 "/api/tasks",
-                json={"schedule_type": "machining", "mode": "static", "dispatching_rule": "DELIVERY"},
+                json={
+                    "schedule_type": "machining",
+                    "mode": "static",
+                    "dispatching_rule": "DELIVERY",
+                    "schedule_start": "2026-07-14T08:00:00",
+                },
                 headers=self.headers,
             )
         finally:
@@ -152,6 +254,7 @@ class BusinessSystemTests(unittest.TestCase):
         order = next(item for item in snapshot["order_processes"] if item["order_id"] == "DEMO_MC_ORDER")
         self.assertEqual(order["processes"][0]["status"], "CONFIRMED")
         self.assertEqual(order["processes"][0]["schedule_version_id"], version_id)
+        self.assertEqual(order["processes"][0]["locks"], {})
 
         published_detail = self.client.get(f"/api/versions/{version_id}", headers=self.headers).json()
         published_process = published_detail["result"]["schedule"][0]
@@ -176,6 +279,62 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(effective_process["machine_id"], "DEMO_MC_01")
         self.assertEqual(effective_process["worker_id"], "DEMO_W_MC")
         self.assertFalse(effective_process["manually_locked"])
+
+        locked = self.client.post(
+            "/api/processes/DEMO_MC_P10/lock",
+            json={
+                "machine_id": "DEMO_MC_01",
+                "worker_id": "DEMO_W_MC",
+                "start_time": "2026-07-14T08:00:00",
+                "end_time": "2026-07-14T13:00:00",
+                "lock_reason": "测试人工锁定",
+                "schedule_version_id": version_id,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(locked.status_code, 200, locked.text)
+        self.assertEqual(locked.json()["locks"]["operator"], "admin")
+        self.assertEqual(locked.json()["locks"]["lock_reason"], "测试人工锁定")
+        lock_time = locked.json()["locks"]["lock_time"]
+
+        stale_update = self.client.post(
+            "/api/processes/DEMO_MC_P10/lock",
+            json={
+                "machine_id": "DEMO_MC_01",
+                "lock_reason": "过期页面提交",
+                "schedule_version_id": version_id,
+                "expected_lock_time": "",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(stale_update.status_code, 409)
+
+        effective_locked = self.client.get(
+            "/api/effective-schedule?schedule_type=machining&order_id=DEMO_MC_ORDER",
+            headers=self.headers,
+        ).json()
+        self.assertEqual(effective_locked["summary"]["locked_processes"], 1)
+        self.assertTrue(effective_locked["schedule"][0]["manually_locked"])
+
+        missing_reason = self.client.request(
+            "DELETE",
+            "/api/processes/DEMO_MC_P10/lock",
+            json={"schedule_version_id": version_id},
+            headers=self.headers,
+        )
+        self.assertEqual(missing_reason.status_code, 422)
+        unlocked = self.client.request(
+            "DELETE",
+            "/api/processes/DEMO_MC_P10/lock",
+            json={
+                "unlock_reason": "测试解除",
+                "schedule_version_id": version_id,
+                "expected_lock_time": lock_time,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(unlocked.status_code, 200, unlocked.text)
+        self.assertEqual(unlocked.json()["locks"], {})
 
 
 if __name__ == "__main__":
