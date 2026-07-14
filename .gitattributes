@@ -1,0 +1,9 @@
+# 统一使用 LF（推荐，团队协作最省心）
+* text=auto eol=lf
+
+# 或针对特定文件类型指定
+*.py text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
