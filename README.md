@@ -4,8 +4,8 @@
 
 详细手册：
 
-- [业务系统部署手册](docs/BUSINESS_DEPLOYMENT_MANUAL.md)
-- [业务系统使用手册](docs/BUSINESS_USER_MANUAL.md)
+- [业务系统部署手册](docs/业务系统部署手册.md)
+- [业务系统使用手册](docs/业务系统用户手册.md)
 
 ## 已实现的业务能力
 

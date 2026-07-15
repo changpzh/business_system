@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,7 +15,7 @@ from .algorithm_client import algorithm_client
 from .config import BASE_DIR, settings
 from .database import audit, db, initialize_database, now_text
 from .security import create_token, decode_token, verify_password
-from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, create_task, execute_task, is_manually_locked, lock_process, parse_json_columns, publish_version, save_task_result, unlock_process, validate_snapshot
+from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, count_schedule_processes, create_task, execute_process_adjustment, execute_task, ga_parameters_for_process_count, is_manually_locked, lock_process, next_working_day_shift_start, parse_json_columns, preview_process_adjustment, publish_version, save_task_result, task_run_summary, unlock_process, validate_snapshot
 
 
 @asynccontextmanager
@@ -234,6 +234,36 @@ def manually_unlock_process(
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
+@app.post("/api/processes/{process_id}/adjustments/preview")
+def preview_manual_process_adjustment(
+    process_id: str,
+    payload: dict[str, Any],
+    _: dict[str, Any] = Depends(require_roles("admin", "planner")),
+) -> dict[str, Any]:
+    try:
+        return preview_process_adjustment(process_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 409 if "已变化" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/processes/{process_id}/adjustments/execute")
+def execute_manual_process_adjustment(
+    process_id: str,
+    payload: dict[str, Any],
+    user: dict[str, Any] = Depends(require_roles("admin", "planner")),
+) -> dict[str, Any]:
+    try:
+        return execute_process_adjustment(process_id, payload, user["username"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 409 if "已变化" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @app.get("/api/master-data/snapshot")
 def snapshot(_: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     with db() as connection:
@@ -386,8 +416,46 @@ def submit_task(payload: dict[str, Any], background_tasks: BackgroundTasks, user
 @app.get("/api/tasks")
 def list_tasks(limit: int = 100, _: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
     with db() as connection:
-        rows = connection.execute("SELECT task_id,schedule_type,mode,dispatching_rule,status,error_message,created_by,created_at,started_at,completed_at FROM schedule_tasks ORDER BY created_at DESC LIMIT ?", (min(max(limit, 1), 500),)).fetchall()
-    return [dict(row) for row in rows]
+        rows = connection.execute("""SELECT task_id,schedule_type,mode,dispatching_rule,status,error_message,created_by,created_at,started_at,completed_at,
+                                            json_extract(request_json,'$.config_overrides.nsga3.population_size') AS configured_population_size,
+                                            json_extract(request_json,'$.config_overrides.nsga3.generations') AS configured_generations
+                                       FROM schedule_tasks ORDER BY created_at DESC LIMIT ?""", (min(max(limit, 1), 500),)).fetchall()
+    records = []
+    for row in rows:
+        item = dict(row)
+        item.update(task_run_summary(item))
+        records.append(item)
+    return records
+
+
+@app.get("/api/tasks/defaults")
+def task_defaults(
+    schedule_type: str = "machining",
+    _: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    if schedule_type not in {"machining", "heat_treatment", "assembly"}:
+        raise HTTPException(status_code=422, detail="schedule_type 不合法")
+    with db() as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM master_records WHERE entity_type='calendar' ORDER BY entity_id LIMIT 1"
+        ).fetchone()
+        calendar = json.loads(row["payload_json"]) if row else {}
+        process_count = count_schedule_processes(connection, schedule_type)
+    try:
+        schedule_start = next_working_day_shift_start(calendar)
+        source = "factory_calendar"
+    except (KeyError, TypeError, ValueError):
+        fallback_day = datetime.now().date() + timedelta(days=1)
+        while fallback_day.weekday() >= 5:
+            fallback_day += timedelta(days=1)
+        schedule_start = datetime.combine(fallback_day, datetime.strptime("08:00", "%H:%M").time())
+        source = "weekday_fallback"
+    return {
+        "schedule_start": schedule_start.isoformat(timespec="minutes"),
+        "source": source,
+        "schedule_type": schedule_type,
+        **ga_parameters_for_process_count(process_count),
+    }
 
 
 @app.get("/api/tasks/{task_id}")
@@ -437,16 +505,25 @@ def schedule_callback(payload: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/versions")
 def list_versions(_: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
     with db() as connection:
-        rows = connection.execute("""SELECT v.version_id,v.version_no,v.task_id,v.schedule_type,v.status,v.created_by,v.created_at,v.reviewed_by,v.reviewed_at,v.review_comment,v.published_by,v.published_at,t.mode,t.dispatching_rule
+        rows = connection.execute("""SELECT v.version_id,v.version_no,v.task_id,v.schedule_type,v.status,v.created_by,v.created_at,v.reviewed_by,v.reviewed_at,v.review_comment,v.published_by,v.published_at,t.mode,t.dispatching_rule,t.started_at,t.completed_at,
+                                           json_extract(t.request_json,'$.config_overrides.nsga3.population_size') AS configured_population_size,
+                                           json_extract(t.request_json,'$.config_overrides.nsga3.generations') AS configured_generations
                                    FROM schedule_versions v JOIN schedule_tasks t ON t.task_id=v.task_id ORDER BY v.version_no DESC""").fetchall()
-    return [dict(row) for row in rows]
+    records = []
+    for row in rows:
+        item = dict(row)
+        item.update(task_run_summary(item))
+        records.append(item)
+    return records
 
 
 @app.get("/api/versions/{version_id}")
 def get_version(version_id: str, _: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     with db() as connection:
         row = connection.execute(
-            """SELECT v.*,t.snapshot_json
+            """SELECT v.*,t.snapshot_json,t.request_json,t.mode,t.dispatching_rule,t.started_at,t.completed_at,
+                      json_extract(t.request_json,'$.config_overrides.nsga3.population_size') AS configured_population_size,
+                      json_extract(t.request_json,'$.config_overrides.nsga3.generations') AS configured_generations
                FROM schedule_versions v
                JOIN schedule_tasks t ON t.task_id=v.task_id
                WHERE v.version_id=?""",
@@ -458,6 +535,16 @@ def get_version(version_id: str, _: dict[str, Any] = Depends(current_user)) -> d
     if not row:
         raise HTTPException(status_code=404, detail="排程版本不存在")
     record = dict(row)
+    request_value = json.loads(record.get("request_json") or "{}")
+    run_summary = task_run_summary(record)
+    record.update(run_summary)
+    record["schedule_parameters"] = {
+        **run_summary,
+        "config_overrides": request_value.get("config_overrides") or {},
+    }
+    record.pop("request_json", None)
+    record.pop("configured_population_size", None)
+    record.pop("configured_generations", None)
     result = json.loads(record.pop("result_json"))
     snapshot = json.loads(record.pop("snapshot_json"))
     process_index = {
@@ -525,8 +612,22 @@ def publish(version_id: str, user: dict[str, Any] = Depends(require_roles("admin
 @app.get("/api/versions/compare/{left_id}/{right_id}")
 def compare(left_id: str, right_id: str, _: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     with db() as connection:
-        left = connection.execute("SELECT * FROM schedule_versions WHERE version_id=?", (left_id,)).fetchone()
-        right = connection.execute("SELECT * FROM schedule_versions WHERE version_id=?", (right_id,)).fetchone()
+        left = connection.execute(
+            """SELECT v.*,t.mode,t.dispatching_rule,t.started_at,t.completed_at,
+                      json_extract(t.request_json,'$.config_overrides.nsga3.population_size') AS configured_population_size,
+                      json_extract(t.request_json,'$.config_overrides.nsga3.generations') AS configured_generations
+                 FROM schedule_versions v JOIN schedule_tasks t ON t.task_id=v.task_id
+                WHERE v.version_id=?""",
+            (left_id,),
+        ).fetchone()
+        right = connection.execute(
+            """SELECT v.*,t.mode,t.dispatching_rule,t.started_at,t.completed_at,
+                      json_extract(t.request_json,'$.config_overrides.nsga3.population_size') AS configured_population_size,
+                      json_extract(t.request_json,'$.config_overrides.nsga3.generations') AS configured_generations
+                 FROM schedule_versions v JOIN schedule_tasks t ON t.task_id=v.task_id
+                WHERE v.version_id=?""",
+            (right_id,),
+        ).fetchone()
     if not left or not right:
         raise HTTPException(status_code=404, detail="对比版本不存在")
     return compare_versions(dict(left), dict(right))
