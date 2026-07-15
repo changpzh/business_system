@@ -369,6 +369,8 @@ function defaultRecordByOrderType(){
         order_type:'STANDARD',
         product_id:'',
         product_name:'',
+        material:'',
+        material_grade:'',
         quantity:1,
         priority:1,
         due_date:'',

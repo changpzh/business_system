@@ -27,6 +27,7 @@ from business_app.services import (
     is_manually_locked,
     next_working_day_shift_start,
     select_calendar,
+    validate_snapshot,
 )
 
 
@@ -163,6 +164,25 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(select_calendar(connection, "heat_treatment")["calendar_id"], "CAL_heat_treatment")
         self.assertEqual(select_calendar(connection, "assembly")["calendar_id"], "CAL_assembly")
         connection.close()
+
+    def test_enabled_cooling_constraint_requires_method_in_business_snapshot(self) -> None:
+        snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
+        order = next(item for item in snapshot["order_processes"] if item.get("order_id") == "DEMO_HEAT_ORDER")
+        process = order["processes"][0]
+        process["cooling_constraint_enabled"] = True
+        process["cooling_method"] = ""
+        self.assertTrue(
+            any("已启用冷却约束但缺少 cooling_method" in item for item in validate_snapshot(snapshot))
+        )
+        process["cooling_method"] = "N2_GAS_QUENCH"
+        process["override_batch_rules"] = {
+            "allow_batch_merge": True,
+            "heat_treat_recipe": "HT-A",
+            "unit_size_category": "L",
+            "unit_volume_coefficient": 2.0,
+        }
+        order["material_grade"] = "   "
+        self.assertTrue(any("允许合批但缺少 material_grade" in item for item in validate_snapshot(snapshot)))
 
     def test_ga_parameters_follow_process_scale_boundaries(self) -> None:
         expectations = {

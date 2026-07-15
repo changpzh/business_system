@@ -1372,6 +1372,14 @@ def validate_snapshot(snapshot: dict[str, Any]) -> list[str]:
         order_id = str(order.get("order_id", ""))
         if not order_id:
             errors.append("存在缺少 order_id 的订单")
+        if "material_grade" in order and not isinstance(order.get("material_grade"), str):
+            errors.append(f"订单 {order_id} 的 material_grade 必须是字符串")
+        allows_batch_merge = any(
+            bool((process.get("override_batch_rules", {}) or {}).get("allow_batch_merge"))
+            for process in order.get("processes", [])
+        )
+        if allows_batch_merge and not str(order.get("material_grade") or "").strip():
+            errors.append(f"订单 {order_id} 允许合批但缺少 material_grade")
         for process in order.get("processes", []):
             process_id = str(process.get("process_id", ""))
             if not process_id:
@@ -1382,6 +1390,13 @@ def validate_snapshot(snapshot: dict[str, Any]) -> list[str]:
             group_id = str(process.get("resource_group_id", ""))
             if group_id not in groups:
                 errors.append(f"工序 {process_id} 引用了不存在的资源组 {group_id}")
+            cooling_enabled = process.get("cooling_constraint_enabled", False)
+            if not isinstance(cooling_enabled, bool):
+                errors.append(f"工序 {process_id} 的 cooling_constraint_enabled 必须是布尔值")
+            requirements = process.get("resource_requirements", {}) or {}
+            cooling_method = process.get("cooling_method") or requirements.get("cooling_method")
+            if cooling_enabled is True and not str(cooling_method or "").strip():
+                errors.append(f"工序 {process_id} 已启用冷却约束但缺少 cooling_method")
             locks = process.get("locks", {})
             if not isinstance(locks, dict):
                 errors.append(f"工序 {process_id} 的 locks 必须是对象")
