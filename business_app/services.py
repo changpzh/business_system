@@ -4,11 +4,10 @@ import json
 import sqlite3
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
-from math import ceil, floor
 from typing import Any
 from uuid import uuid4
 
-from .algorithm_client import algorithm_client
+from .algorithm_client import AlgorithmClientError, algorithm_client
 from .config import settings
 from .database import audit, db, now_text
 
@@ -19,6 +18,14 @@ ENTITY_CONFIG = {
     "worker": ("worker_profiles", "worker_id"),
     "resource_group": ("resource_group_profiles", "resource_group_id"),
     "order": ("order_processes", "order_id"),
+}
+
+SCHEDULE_TYPES = ("machining", "heat_treatment", "assembly")
+RESOURCE_GROUP_SCHEDULE_TYPES = {
+    "MACHINING": "machining",
+    "HEAT_TREAT": "heat_treatment",
+    "SURFACE_TREAT": "heat_treatment",
+    "ASSEMBLY": "assembly",
 }
 
 BATCH_METADATA_FIELDS = (
@@ -47,7 +54,38 @@ def parse_json_columns(record: dict[str, Any] | None, *columns: str) -> dict[str
     return record
 
 
-def build_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
+def _calendar_schedule_type(calendar: dict[str, Any]) -> str | None:
+    explicit = str(calendar.get("schedule_type") or "").lower()
+    if explicit in SCHEDULE_TYPES:
+        return explicit
+    marker = " ".join(
+        str(calendar.get(field) or "") for field in ("calendar_id", "calendar_name", "calendar_type")
+    ).upper()
+    if "HEAT" in marker or "热" in marker:
+        return "heat_treatment"
+    if "ASSEMBLY" in marker or "装配" in marker:
+        return "assembly"
+    return None
+
+
+def select_calendar(connection: sqlite3.Connection, schedule_type: str = "machining") -> dict[str, Any]:
+    rows = connection.execute(
+        "SELECT payload_json FROM master_records WHERE entity_type='calendar' ORDER BY entity_id"
+    ).fetchall()
+    calendars = [json.loads(row["payload_json"]) for row in rows]
+    exact = next((item for item in calendars if _calendar_schedule_type(item) == schedule_type), None)
+    if exact:
+        return exact
+    legacy = next((item for item in calendars if _calendar_schedule_type(item) is None), None)
+    return legacy or (calendars[0] if calendars else {})
+
+
+def build_snapshot(
+    connection: sqlite3.Connection,
+    schedule_type: str = "machining",
+    *,
+    include_all_calendars: bool = False,
+) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "machine_calendar": {},
         "machine_profiles": [],
@@ -55,12 +93,19 @@ def build_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
         "resource_group_profiles": [],
         "order_processes": [],
     }
+    all_calendars: list[dict[str, Any]] = []
     for entity_type, (snapshot_key, _) in ENTITY_CONFIG.items():
         rows = connection.execute(
             "SELECT payload_json FROM master_records WHERE entity_type=? ORDER BY entity_id", (entity_type,)
         ).fetchall()
         values = [json.loads(row["payload_json"]) for row in rows]
-        snapshot[snapshot_key] = (values[0] if values else {}) if entity_type == "calendar" else values
+        if entity_type == "calendar":
+            all_calendars = values
+            snapshot[snapshot_key] = select_calendar(connection, schedule_type)
+        else:
+            snapshot[snapshot_key] = values
+    if include_all_calendars:
+        snapshot["machine_calendars"] = all_calendars
     return snapshot
 
 
@@ -99,9 +144,6 @@ def is_manually_locked(record: dict[str, Any] | None) -> bool:
 def _validate_lock_payload(
     process: dict[str, Any],
     payload: dict[str, Any],
-    group: dict[str, Any],
-    machine_index: dict[str, dict[str, Any]],
-    worker_index: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     reason = str(payload.get("lock_reason") or "").strip()
     if not reason:
@@ -117,36 +159,6 @@ def _validate_lock_payload(
         raise ValueError("锁定开始时间和结束时间必须同时填写")
     if not any((machine_id, worker_id, start_text, end_text)):
         raise ValueError("至少需要锁定设备、人员或计划时间")
-
-    allowed_machines = {str(item.get("machine_id")) for item in group.get("machines", [])}
-    allowed_workers = {str(item.get("worker_id")) for item in group.get("workers", [])}
-    if machine_id and machine_id not in allowed_machines:
-        raise ValueError(f"设备 {machine_id} 不属于工序资源组")
-    if worker_id and worker_id not in allowed_workers:
-        raise ValueError(f"人员 {worker_id} 不属于工序资源组")
-    if machine_id and machine_index.get(machine_id, {}).get("status", "ACTIVE") != "ACTIVE":
-        raise ValueError(f"设备 {machine_id} 当前不可用")
-    if worker_id and worker_index.get(worker_id, {}).get("status", "ACTIVE") != "ACTIVE":
-        raise ValueError(f"人员 {worker_id} 当前不可用")
-
-    if machine_id:
-        machine = machine_index.get(machine_id, {})
-        requirements = process.get("resource_requirements", {}) or {}
-        cooling_method = process.get("cooling_method") or requirements.get("cooling_method")
-        capabilities = machine.get("capabilities", {}) or {}
-        cooling_methods = machine.get("cooling_methods", capabilities.get("cooling_methods", [])) or []
-        if cooling_method and cooling_method not in cooling_methods:
-            raise ValueError(f"设备 {machine_id} 不支持工序要求的冷却方式 {cooling_method}")
-
-    mappings = group.get("machine_worker_mapping", []) or []
-    if machine_id and worker_id and mappings:
-        valid_mapping = any(
-            str(item.get("machine_id")) == machine_id
-            and worker_id in {str(value) for value in item.get("allowed_workers", [])}
-            for item in mappings
-        )
-        if not valid_mapping:
-            raise ValueError(f"设备 {machine_id} 与人员 {worker_id} 不满足资源组映射约束")
 
     normalized: dict[str, Any] = {"lock_reason": reason}
     if machine_id:
@@ -166,16 +178,62 @@ def _validate_lock_payload(
     return normalized
 
 
+def _schedule_type_for_group(group: dict[str, Any]) -> str:
+    return RESOURCE_GROUP_SCHEDULE_TYPES.get(
+        str(group.get("resource_group_type") or "").upper(),
+        "machining",
+    )
+
+
+def _process_constraint_result(
+    snapshot: dict[str, Any],
+    schedule_type: str,
+    process_id: str,
+    machine_id: Any,
+    worker_id: Any,
+    start_time: Any = None,
+    end_time: Any = None,
+    *,
+    require_complete_resources: bool = True,
+    find_window_from: Any = None,
+    duration_minutes: float | None = None,
+) -> dict[str, Any]:
+    request = {
+        "schedule_type": schedule_type,
+        "data_snapshot": snapshot,
+        "process_id": process_id,
+        "machine_id": machine_id or None,
+        "worker_id": worker_id or None,
+        "plan_start_time": start_time or None,
+        "plan_end_time": end_time or None,
+        "find_window_from": find_window_from or None,
+        "duration_minutes": duration_minutes,
+        "require_complete_resources": require_complete_resources,
+    }
+    try:
+        result = algorithm_client.validate_process_constraints(request)
+    except AlgorithmClientError as exc:
+        raise ValueError(f"统一工艺约束服务不可用：{exc}") from exc
+    if not isinstance(result, dict) or "valid" not in result:
+        raise ValueError("统一工艺约束服务返回无效结果")
+    return result
+
+
+def _raise_constraint_errors(result: dict[str, Any], prefix: str = "") -> None:
+    if result.get("valid"):
+        return
+    messages = [
+        str(item.get("message") or item.get("code"))
+        for item in result.get("issues", []) or []
+        if item.get("severity", "hard") == "hard"
+    ]
+    raise ValueError(prefix + ("；".join(messages) or "工艺约束不满足"))
+
+
 def lock_process(process_id: str, payload: dict[str, Any], actor: str) -> dict[str, Any]:
     """人工锁定订单工序，并记录操作人、时间和原因。"""
     with db() as connection:
-        snapshot = build_snapshot(connection)
-        machine_index = {
-            str(item.get("machine_id")): item for item in snapshot.get("machine_profiles", [])
-        }
-        worker_index = {
-            str(item.get("worker_id")): item for item in snapshot.get("worker_profiles", [])
-        }
+        snapshot = build_snapshot(connection, include_all_calendars=True)
         group_index = {
             str(item.get("resource_group_id")): item
             for item in snapshot.get("resource_group_profiles", [])
@@ -201,7 +259,23 @@ def lock_process(process_id: str, payload: dict[str, Any], actor: str) -> dict[s
             if "expected_lock_time" in payload and str(payload.get("expected_lock_time") or "") != current_lock_time:
                 raise ValueError("人工锁已变化，请刷新甘特图后重新操作")
             group = group_index.get(str(process.get("resource_group_id") or ""), {})
-            normalized = _validate_lock_payload(process, payload, group, machine_index, worker_index)
+            normalized = _validate_lock_payload(process, payload)
+            schedule_type = _schedule_type_for_group(group)
+            snapshot["machine_calendar"] = select_calendar(connection, schedule_type)
+            snapshot.pop("machine_calendars", None)
+            resolved_machine_id = normalized.get("machine_id") or process.get("assigned_machine_id")
+            resolved_worker_id = normalized.get("worker_id") or process.get("assigned_worker_id")
+            constraint_result = _process_constraint_result(
+                snapshot,
+                schedule_type,
+                process_id,
+                resolved_machine_id,
+                resolved_worker_id,
+                normalized.get("start_time"),
+                normalized.get("end_time"),
+                require_complete_resources=False,
+            )
+            _raise_constraint_errors(constraint_result, "人工锁校验未通过：")
             stamp = now_text()
             locks = {
                 **{key: value for key, value in normalized.items() if key != "lock_reason"},
@@ -316,114 +390,6 @@ def _intervals_overlap(left_start: datetime, left_end: datetime, right_start: da
     return left_start < right_end and right_start < left_end
 
 
-def _process_duration_minutes(
-    process: dict[str, Any],
-    current: dict[str, Any],
-    resource_group_type: str,
-    machine: dict[str, Any],
-) -> float:
-    explicit = float(process.get("total_duration_minutes") or 0)
-    if explicit > 0:
-        return explicit
-    unit = float(process.get("unit_duration_minutes") or process.get("duration_minutes") or 0)
-    quantity = float(
-        process.get("remaining_quantity")
-        or process.get("process_quantity")
-        or process.get("quantity")
-        or 1
-    )
-    if unit > 0:
-        if resource_group_type in {"HEAT_TREAT", "SURFACE_TREAT"}:
-            capacity = float(process.get("quantity_per_run") or process.get("batch_capacity_quantity") or 0)
-            coefficient = float(process.get("unit_volume_coefficient") or 0)
-            machine_volume = float(machine.get("max_volume_l") or 0)
-            if capacity <= 0 and coefficient > 0 and machine_volume > 0:
-                capacity = max(floor(machine_volume / coefficient), 1)
-            capacity = capacity or max(quantity, 1)
-            return max(unit * ceil(max(quantity, 1) / capacity), 0)
-        return max(unit * max(quantity, 1), 0)
-    current_start = _time_value(current.get("plan_start_time"))
-    current_end = _time_value(current.get("plan_end_time"))
-    if current_start is not None and current_end is not None and current_end > current_start:
-        return (current_end - current_start) / 60.0
-    return 0
-
-
-def _raw_time_ranges(entries: list[dict[str, Any]], target_day: date) -> list[tuple[datetime, datetime]]:
-    ranges: list[tuple[datetime, datetime]] = []
-    for entry in entries or []:
-        applies = entry.get("date") == target_day.isoformat()
-        if entry.get("date_start") and entry.get("date_end"):
-            applies = date.fromisoformat(str(entry["date_start"])) <= target_day <= date.fromisoformat(
-                str(entry["date_end"])
-            )
-        if not applies:
-            continue
-        if str(entry.get("status", "CONFIRMED")).upper() not in {"ACTIVE", "APPROVED", "CONFIRMED"}:
-            continue
-        for segment in entry.get("segments", []) or []:
-            left = datetime.combine(target_day, datetime.strptime(str(segment["start"]), "%H:%M").time())
-            right = datetime.combine(target_day, datetime.strptime(str(segment["end"]), "%H:%M").time())
-            if right <= left:
-                right += timedelta(days=1)
-            ranges.append((left, right))
-    return ranges
-
-
-def _merge_time_ranges(ranges: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
-    merged: list[tuple[datetime, datetime]] = []
-    for left, right in sorted((left, right) for left, right in ranges if right > left):
-        if merged and left <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
-        else:
-            merged.append((left, right))
-    return merged
-
-
-def _subtract_time_ranges(
-    available: list[tuple[datetime, datetime]], blocked: list[tuple[datetime, datetime]]
-) -> list[tuple[datetime, datetime]]:
-    result = _merge_time_ranges(available)
-    for blocked_start, blocked_end in _merge_time_ranges(blocked):
-        next_result: list[tuple[datetime, datetime]] = []
-        for left, right in result:
-            if blocked_end <= left or blocked_start >= right:
-                next_result.append((left, right))
-                continue
-            if left < blocked_start:
-                next_result.append((left, blocked_start))
-            if blocked_end < right:
-                next_result.append((blocked_end, right))
-        result = next_result
-    return result
-
-
-def _intersect_time_ranges(
-    left_ranges: list[tuple[datetime, datetime]], right_ranges: list[tuple[datetime, datetime]]
-) -> list[tuple[datetime, datetime]]:
-    intersections: list[tuple[datetime, datetime]] = []
-    for left_start, left_end in left_ranges:
-        for right_start, right_end in right_ranges:
-            start = max(left_start, right_start)
-            end = min(left_end, right_end)
-            if end > start:
-                intersections.append((start, end))
-    return _merge_time_ranges(intersections)
-
-
-def _calendar_day_ranges(calendar: dict[str, Any], target_day: date) -> list[tuple[datetime, datetime]]:
-    shifts = _calendar_day_shifts(calendar, target_day)
-    ranges: list[tuple[datetime, datetime]] = []
-    for shift in shifts:
-        for segment in shift.get("segments", []) or []:
-            left = datetime.combine(target_day, datetime.strptime(str(segment["start"]), "%H:%M").time())
-            right = datetime.combine(target_day, datetime.strptime(str(segment["end"]), "%H:%M").time())
-            if right <= left:
-                right += timedelta(days=1)
-            ranges.append((left, right))
-    return _merge_time_ranges(ranges)
-
-
 def _calendar_day_shifts(calendar: dict[str, Any], target_day: date) -> list[dict[str, Any]]:
     """Return the configured shifts for one date, honoring special-day overrides."""
     special = (calendar.get("special_shifts") or {}).get(target_day.isoformat())
@@ -444,6 +410,12 @@ def next_working_day_shift_start(
     target_day = now.date() + timedelta(days=1)
     for _ in range(max(horizon_days, 1)):
         shifts = _calendar_day_shifts(calendar, target_day)
+        preferred_start = calendar.get("day_shift_start")
+        if shifts and preferred_start:
+            return datetime.combine(
+                target_day,
+                datetime.strptime(str(preferred_start), "%H:%M").time(),
+            )
         day_shifts = [
             shift
             for shift in shifts
@@ -512,110 +484,6 @@ def ga_parameters_for_process_count(process_count: int) -> dict[str, int]:
     }
 
 
-def _resource_available_ranges(
-    calendar: dict[str, Any], profile: dict[str, Any], start: datetime, end: datetime
-) -> list[tuple[datetime, datetime]]:
-    ranges: list[tuple[datetime, datetime]] = []
-    target_day = start.date()
-    while target_day <= end.date():
-        day_ranges = _calendar_day_ranges(calendar, target_day)
-        day_ranges = _merge_time_ranges(
-            day_ranges + _raw_time_ranges(profile.get("availability_overrides", []) or [], target_day)
-        )
-        day_ranges = _subtract_time_ranges(
-            day_ranges,
-            _raw_time_ranges(profile.get("unavailability", []) or [], target_day),
-        )
-        ranges.extend(day_ranges)
-        target_day += timedelta(days=1)
-    return _merge_time_ranges(ranges)
-
-
-def _check_adjustment_calendar(
-    calendar: dict[str, Any],
-    machine: dict[str, Any],
-    worker: dict[str, Any],
-    start: datetime,
-    end: datetime,
-    required_minutes: float,
-    resource_group_type: str,
-) -> bool:
-    available = _resource_available_ranges(calendar, machine, start, end) if machine else _calendar_day_ranges(
-        calendar, start.date()
-    )
-    if worker:
-        worker_ranges = _resource_available_ranges(calendar, worker, start, end)
-        available = _intersect_time_ranges(available, worker_ranges)
-    overlaps = [
-        (max(start, left), min(end, right))
-        for left, right in available
-        if left < end and start < right
-    ]
-    if resource_group_type in {"HEAT_TREAT", "SURFACE_TREAT"}:
-        return any(left <= start and right >= end for left, right in overlaps)
-    available_minutes = sum(max((right - left).total_seconds() / 60.0, 0) for left, right in overlaps)
-    return available_minutes + 1e-6 >= required_minutes
-
-
-def _find_adjustment_window(
-    calendar: dict[str, Any],
-    machine: dict[str, Any],
-    worker: dict[str, Any],
-    earliest_start: datetime,
-    required_minutes: float,
-    resource_group_type: str,
-) -> tuple[datetime, datetime]:
-    remaining = max(required_minutes, 0)
-    first_start: datetime | None = None
-    target_day = earliest_start.date()
-    horizon_end = target_day + timedelta(days=120)
-    while target_day <= horizon_end:
-        day_start = datetime.combine(target_day, time.min)
-        day_end = day_start + timedelta(days=1)
-        available = _resource_available_ranges(calendar, machine, day_start, day_end) if machine else _calendar_day_ranges(
-            calendar, target_day
-        )
-        if worker:
-            available = _intersect_time_ranges(
-                available,
-                _resource_available_ranges(calendar, worker, day_start, day_end),
-            )
-        for left, right in available:
-            if right <= earliest_start:
-                continue
-            usable_start = max(left, earliest_start)
-            usable_minutes = max((right - usable_start).total_seconds() / 60.0, 0)
-            if resource_group_type in {"HEAT_TREAT", "SURFACE_TREAT"}:
-                if usable_minutes + 1e-6 >= required_minutes:
-                    return usable_start, usable_start + timedelta(minutes=required_minutes)
-                continue
-            if first_start is None:
-                first_start = usable_start
-            if usable_minutes + 1e-6 >= remaining:
-                return first_start, usable_start + timedelta(minutes=remaining)
-            remaining -= usable_minutes
-        target_day += timedelta(days=1)
-    fallback = first_start or earliest_start
-    return fallback, fallback + timedelta(minutes=required_minutes)
-
-
-def _skill_rank(value: Any) -> int:
-    normalized = str(value or "").strip().lower()
-    ranks = {
-        "trainee": 0,
-        "junior": 1,
-        "初级": 1,
-        "intermediate": 2,
-        "middle": 2,
-        "中级": 2,
-        "senior": 3,
-        "高级": 3,
-        "expert": 4,
-        "专家": 4,
-    }
-    return ranks.get(normalized, 0)
-
-
 def _process_adjustment_indexes(snapshot: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     process_index: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for order in snapshot.get("order_processes", []):
@@ -643,11 +511,11 @@ def _adjustment_issue(code: str, title: str, message: str, issue_type: str, **de
 def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """预校验一次单工序时间/设备/人员调整，并返回确认弹窗所需的影响分析。"""
     with db() as connection:
-        snapshot = build_snapshot(connection)
         effective = build_effective_schedule(connection)
+        current = next((item for item in effective.get("schedule", []) if str(item.get("process_id")) == process_id), None)
+        snapshot = build_snapshot(connection, str((current or {}).get("schedule_type") or "machining"))
     process_index, machine_index, worker_index, group_index = _process_adjustment_indexes(snapshot)
     record = process_index.get(process_id)
-    current = next((item for item in effective.get("schedule", []) if str(item.get("process_id")) == process_id), None)
     if not record or not current:
         raise KeyError("工序不存在或尚未进入生效排程")
     order, process = record
@@ -670,29 +538,37 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
     hard_errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     checks: list[dict[str, Any]] = []
-    required_minutes = _process_duration_minutes(
-        process,
-        current,
-        str(group.get("resource_group_type") or ""),
-        machine,
+    constraint_result = _process_constraint_result(
+        snapshot,
+        str(current.get("schedule_type") or _schedule_type_for_group(group)),
+        process_id,
+        machine_id,
+        worker_id,
+        new_start.isoformat(timespec="seconds"),
+        new_end.isoformat(timespec="seconds"),
+        require_complete_resources=True,
     )
+    required_minutes = float(constraint_result.get("required_minutes") or 0)
+    for issue in constraint_result.get("issues", []) or []:
+        target = warnings if issue.get("severity") == "warning" else hard_errors
+        target.append(
+            _adjustment_issue(
+                str(issue.get("code") or "PROCESS_CONSTRAINT"),
+                str(issue.get("title") or "工艺约束"),
+                str(issue.get("message") or "工艺约束不满足"),
+                "warning" if issue.get("severity") == "warning" else "hard",
+            )
+        )
     new_minutes = max((new_end - new_start).total_seconds() / 60.0, 0)
 
     if current.get("manually_locked"):
         hard_errors.append(
             _adjustment_issue("L-01", "任务已锁定", "当前工序已人工锁定，请先解锁后再调整", "hard")
         )
-    if new_end <= new_start or new_minutes + 1e-6 < required_minutes:
-        hard_errors.append(
-            _adjustment_issue(
-                "F-06",
-                "工时不足",
-                f"目标时段不足，该工序至少需要 {required_minutes / 60:.2f} 小时",
-                "hard",
-                required_minutes=required_minutes,
-            )
-        )
-    else:
+    if not any(
+        item["code"] in {"TIME_RANGE_INVALID", "PROCESS_DURATION_SHORTAGE", "RESOURCE_CALENDAR"}
+        for item in hard_errors
+    ):
         checks.append(_adjustment_issue("G-01", "工时充足", "目标时段满足标准工时", "pass"))
 
     earliest_start = now
@@ -749,100 +625,7 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
     if not any(item["code"] in {"F-01", "F-02"} for item in hard_errors):
         checks.append(_adjustment_issue("G-03", "前序约束", "新开工时间满足前序完工约束", "pass"))
 
-    allowed_machines = {str(item.get("machine_id")) for item in group.get("machines", [])}
-    allowed_workers = {str(item.get("worker_id")) for item in group.get("workers", [])}
-    if machine_id not in allowed_machines:
-        hard_errors.append(
-            _adjustment_issue("R-01", "设备不在资源组", f"设备 {machine_id} 不属于当前工序资源组", "hard")
-        )
-    elif machine.get("status", "ACTIVE") != "ACTIVE":
-        hard_errors.append(_adjustment_issue("R-02", "设备不可用", f"设备 {machine_id} 当前不可用", "hard"))
-    if worker_id not in allowed_workers:
-        hard_errors.append(
-            _adjustment_issue("P-01", "人员资质不匹配", f"人员 {worker_id} 不属于当前工序资源组", "hard")
-        )
-    elif worker.get("status", "ACTIVE") != "ACTIVE":
-        hard_errors.append(_adjustment_issue("P-01", "人员不可用", f"人员 {worker_id} 当前不可用", "hard"))
-
-    mappings = group.get("machine_worker_mapping", []) or []
-    if machine_id and worker_id and mappings:
-        mapping_valid = any(
-            str(item.get("machine_id")) == machine_id
-            and worker_id in {str(value) for value in item.get("allowed_workers", []) or []}
-            for item in mappings
-        )
-        if not mapping_valid:
-            hard_errors.append(
-                _adjustment_issue(
-                    "P-01",
-                    "人员资质不匹配",
-                    f"人员 {worker_id} 未获授权操作设备 {machine_id}",
-                    "hard",
-                )
-            )
-
     requirements = process.get("resource_requirements", {}) or {}
-    required_certifications = set(
-        requirements.get("required_certifications")
-        or process.get("required_certifications")
-        or []
-    )
-    worker_certifications = set(worker.get("certifications") or worker.get("qualification_certificates") or [])
-    missing_certifications = sorted(required_certifications - worker_certifications)
-    if missing_certifications:
-        hard_errors.append(
-            _adjustment_issue(
-                "P-01",
-                "人员资质不匹配",
-                f"人员 {worker_id} 缺少资质：{', '.join(missing_certifications)}",
-                "hard",
-            )
-        )
-    required_skill = requirements.get("skill_level") or process.get("required_skill_level")
-    if required_skill and _skill_rank(worker.get("skill_level")) < _skill_rank(required_skill):
-        warnings.append(
-            _adjustment_issue(
-                "P-02",
-                "技能等级不足",
-                f"人员 {worker_id} 的技能等级低于工序要求 {required_skill}",
-                "warning",
-            )
-        )
-
-    cooling_method = process.get("cooling_method") or requirements.get("cooling_method")
-    supported_cooling = machine.get("cooling_methods") or (machine.get("capabilities") or {}).get(
-        "cooling_methods", []
-    )
-    if cooling_method and supported_cooling and cooling_method not in supported_cooling:
-        hard_errors.append(
-            _adjustment_issue(
-                "R-03",
-                "设备能力不匹配",
-                f"设备 {machine_id} 不支持冷却方式 {cooling_method}",
-                "hard",
-            )
-        )
-
-    if machine_id in allowed_machines and worker_id in allowed_workers and machine and worker:
-        calendar_valid = _check_adjustment_calendar(
-            snapshot.get("machine_calendar") or {},
-            machine,
-            worker,
-            new_start,
-            new_end,
-            required_minutes,
-            str(group.get("resource_group_type") or ""),
-        )
-        if not calendar_valid:
-            hard_errors.append(
-                _adjustment_issue(
-                    "F-06",
-                    "工时不足",
-                    "新时间不满足设备/人员日历或连续生产要求",
-                    "hard",
-                    required_minutes=required_minutes,
-                )
-            )
 
     displaced: list[dict[str, Any]] = []
     for other in effective.get("schedule", []):
@@ -1058,14 +841,30 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
     snap_boundary = earliest_start.replace(second=0, microsecond=0)
     if snap_boundary < earliest_start:
         snap_boundary += timedelta(minutes=1)
-    snap_start, snap_end = _find_adjustment_window(
-        snapshot.get("machine_calendar") or {},
-        machine,
-        worker,
-        snap_boundary,
-        required_minutes,
-        str(group.get("resource_group_type") or ""),
+    suggestion_result = _process_constraint_result(
+        snapshot,
+        str(current.get("schedule_type") or _schedule_type_for_group(group)),
+        process_id,
+        machine_id,
+        worker_id,
+        require_complete_resources=True,
+        find_window_from=snap_boundary.isoformat(timespec="seconds"),
+        duration_minutes=required_minutes,
     )
+    if not suggestion_result.get("valid"):
+        for issue in suggestion_result.get("issues", []) or []:
+            if issue.get("severity", "hard") != "hard":
+                continue
+            if any(item.get("code") == issue.get("code") for item in hard_errors):
+                continue
+            hard_errors.append(
+                _adjustment_issue(
+                    str(issue.get("code") or "RESOURCE_CALENDAR_NO_WINDOW"),
+                    str(issue.get("title") or "无可用日历窗口"),
+                    str(issue.get("message") or "找不到可用日历窗口"),
+                    "hard",
+                )
+            )
     return {
         "process_id": process_id,
         "order_id": order.get("order_id") or "",
@@ -1101,10 +900,7 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
         "delivery_impact": due_warning,
         "recommended_strategy": recommended_strategy,
         "options": options,
-        "snap_suggestion": {
-            "plan_start_time": snap_start.isoformat(timespec="seconds"),
-            "plan_end_time": snap_end.isoformat(timespec="seconds"),
-        },
+        "snap_suggestion": suggestion_result.get("suggested_window"),
         "authorized_replan_process_ids": sorted(
             {
                 str(item.get("process_id"))
@@ -1185,12 +981,13 @@ def execute_process_adjustment(process_id: str, payload: dict[str, Any], actor: 
 
     version_id = save_task_result(task_id, response, actor)
     stamp = now_text()
+    review_schedule_version(
+        version_id,
+        "APPROVED",
+        actor,
+        f"单工序调整确认：{process_id} / {strategy}",
+    )
     with db() as connection:
-        connection.execute(
-            "UPDATE schedule_versions SET status='APPROVED',reviewed_by=?,reviewed_at=?,review_comment=? "
-            "WHERE version_id=? AND status='DRAFT'",
-            (actor, stamp, f"单工序调整确认：{process_id} / {strategy}", version_id),
-        )
         audit(
             connection,
             actor,
@@ -1630,7 +1427,7 @@ def create_task(data: dict[str, Any], actor: str) -> str:
     mode = str(data.get("mode", "static"))
     task_id = str(data.get("task_id") or generate_task_id(schedule_type, mode))
     with db() as connection:
-        snapshot = build_snapshot(connection)
+        snapshot = build_snapshot(connection, schedule_type)
         _restore_batch_metadata_from_history(connection, snapshot)
         validation_errors = validate_snapshot(snapshot)
         if validation_errors:
@@ -1730,6 +1527,75 @@ def save_task_result(task_id: str, response: dict[str, Any], actor: str = "algor
         return version_id
 
 
+def _transition_result_schedule_status(
+    result: dict[str, Any],
+    source_status: str,
+    target_status: str,
+) -> int:
+    """按新版本流程执行单向状态转换，不处理历史版本状态。"""
+    updated = 0
+    for item in result.get("schedule", []) or []:
+        current = str(item.get("status") or "PENDING").upper()
+        if current != source_status:
+            continue
+        item["status"] = target_status
+        updated += 1
+    return updated
+
+
+def review_schedule_version(
+    version_id: str,
+    decision: str,
+    actor: str,
+    comment: str = "",
+) -> dict[str, Any]:
+    normalized_decision = str(decision or "").upper()
+    if normalized_decision not in {"APPROVED", "REJECTED"}:
+        raise ValueError("decision 必须为 APPROVED 或 REJECTED")
+    with db() as connection:
+        version = connection.execute(
+            "SELECT status,result_json FROM schedule_versions WHERE version_id=?",
+            (version_id,),
+        ).fetchone()
+        if not version:
+            raise KeyError("排程版本不存在")
+        if version["status"] != "DRAFT":
+            raise ValueError("只有草稿版本可以审批")
+        result = json.loads(version["result_json"] or "{}")
+        process_status = "SCHEDULED" if normalized_decision == "APPROVED" else "PENDING"
+        updated_processes = (
+            _transition_result_schedule_status(result, "PENDING", "SCHEDULED")
+            if normalized_decision == "APPROVED"
+            else 0
+        )
+        connection.execute(
+            "UPDATE schedule_versions SET status=?,result_json=?,reviewed_by=?,reviewed_at=?,review_comment=? "
+            "WHERE version_id=?",
+            (
+                normalized_decision,
+                json.dumps(result, ensure_ascii=False),
+                actor,
+                now_text(),
+                comment,
+                version_id,
+            ),
+        )
+        audit(
+            connection,
+            actor,
+            f"VERSION_{normalized_decision}",
+            "schedule_version",
+            version_id,
+            {"comment": comment, "process_status": process_status, "updated_processes": updated_processes},
+        )
+        return {
+            "version_id": version_id,
+            "status": normalized_decision,
+            "process_status": process_status,
+            "updated_processes": updated_processes,
+        }
+
+
 def publish_version(version_id: str, actor: str) -> int:
     with db() as connection:
         version = connection.execute("SELECT * FROM schedule_versions WHERE version_id=?", (version_id,)).fetchone()
@@ -1742,11 +1608,12 @@ def publish_version(version_id: str, actor: str) -> int:
             (version["schedule_type"],),
         )
         stamp = now_text()
-        connection.execute(
-            "UPDATE schedule_versions SET status='PUBLISHED',published_by=?,published_at=? WHERE version_id=?",
-            (actor, stamp, version_id),
-        )
         result = json.loads(version["result_json"])
+        _transition_result_schedule_status(result, "SCHEDULED", "CONFIRMED")
+        connection.execute(
+            "UPDATE schedule_versions SET status='PUBLISHED',result_json=?,published_by=?,published_at=? WHERE version_id=?",
+            (json.dumps(result, ensure_ascii=False), actor, stamp, version_id),
+        )
         tasks = result.get("schedule") or []
         task_index = {str(item.get("process_id")): item for item in tasks if item.get("process_id")}
         updated = 0
@@ -1763,7 +1630,12 @@ def publish_version(version_id: str, actor: str) -> int:
                 process["assigned_machine_id"] = scheduled.get("machine_id")
                 process["assigned_worker_id"] = scheduled.get("worker_id")
                 process["schedule_version_id"] = version_id
-                process["status"] = "CONFIRMED"
+                scheduled_status = str(scheduled.get("status") or "CONFIRMED").upper()
+                process["status"] = (
+                    scheduled_status
+                    if scheduled_status in {"IN_PROGRESS", "PAUSED", "COMPLETED", "CANCELLED"}
+                    else "CONFIRMED"
+                )
                 _sync_batch_metadata(process, scheduled)
                 process["locks"] = process.get("locks") or {}
                 changed = True

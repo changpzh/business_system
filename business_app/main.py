@@ -15,7 +15,7 @@ from .algorithm_client import algorithm_client
 from .config import BASE_DIR, settings
 from .database import audit, db, initialize_database, now_text
 from .security import create_token, decode_token, verify_password
-from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, count_schedule_processes, create_task, execute_process_adjustment, execute_task, ga_parameters_for_process_count, is_manually_locked, lock_process, next_working_day_shift_start, parse_json_columns, preview_process_adjustment, publish_version, save_task_result, task_run_summary, unlock_process, validate_snapshot
+from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, count_schedule_processes, create_task, execute_process_adjustment, execute_task, ga_parameters_for_process_count, is_manually_locked, lock_process, next_working_day_shift_start, parse_json_columns, preview_process_adjustment, publish_version, review_schedule_version, save_task_result, select_calendar, task_run_summary, unlock_process, validate_snapshot
 
 
 @asynccontextmanager
@@ -267,13 +267,21 @@ def execute_manual_process_adjustment(
 @app.get("/api/master-data/snapshot")
 def snapshot(_: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     with db() as connection:
-        return build_snapshot(connection)
+        return build_snapshot(connection, include_all_calendars=True)
 
 
 @app.get("/api/master-data/validate")
 def validate_master_data(_: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     with db() as connection:
-        errors = validate_snapshot(build_snapshot(connection))
+        machining_errors = validate_snapshot(build_snapshot(connection, "machining"))
+        errors = [f"机加日历：{item}" if item.startswith("工厂日历") else item for item in machining_errors]
+        for schedule_type, label in (("heat_treatment", "热表"), ("assembly", "装配")):
+            calendar_errors = [
+                item
+                for item in validate_snapshot(build_snapshot(connection, schedule_type))
+                if item.startswith("工厂日历")
+            ]
+            errors.extend(f"{label}日历：{item}" for item in calendar_errors)
     return {"valid": not errors, "errors": errors}
 
 
@@ -282,9 +290,12 @@ def import_snapshot(payload: dict[str, Any], user: dict[str, Any] = Depends(requ
     with db() as connection:
         imported = 0
         for entity_type, (snapshot_key, id_field) in ENTITY_CONFIG.items():
-            if snapshot_key not in payload:
+            source_value = payload.get("machine_calendars") if entity_type == "calendar" else payload.get(snapshot_key)
+            if source_value is None:
+                source_value = payload.get(snapshot_key)
+            if source_value is None:
                 continue
-            records = payload[snapshot_key] if isinstance(payload[snapshot_key], list) else [payload[snapshot_key]]
+            records = source_value if isinstance(source_value, list) else [source_value]
             for record in records:
                 if not isinstance(record, dict) or not record.get(id_field):
                     raise HTTPException(status_code=422, detail=f"{snapshot_key} 记录缺少 {id_field}")
@@ -366,7 +377,27 @@ def put_master(entity_type: str, entity_id: str, payload: dict[str, Any], user: 
     id_field = ENTITY_CONFIG[entity_type][1]
     if str(payload.get(id_field, "")) != entity_id:
         raise HTTPException(status_code=422, detail=f"请求路径与 {id_field} 不一致")
+    if entity_type == "calendar" and payload.get("schedule_type") not in {"machining", "heat_treatment", "assembly"}:
+        raise HTTPException(status_code=422, detail="日历必须指定 machining、heat_treatment 或 assembly")
     with db() as connection:
+        if entity_type == "calendar":
+            rows = connection.execute(
+                "SELECT entity_id,payload_json FROM master_records WHERE entity_type='calendar' AND entity_id<>?",
+                (entity_id,),
+            ).fetchall()
+            duplicate = next(
+                (
+                    row["entity_id"]
+                    for row in rows
+                    if json.loads(row["payload_json"]).get("schedule_type") == payload.get("schedule_type")
+                ),
+                None,
+            )
+            if duplicate:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"该工艺类型已存在日历 {duplicate}，请直接编辑现有日历",
+                )
         connection.execute(
             """INSERT INTO master_records(entity_type,entity_id,payload_json,revision,updated_by,updated_at) VALUES(?,?,?,?,?,?)
                ON CONFLICT(entity_type,entity_id) DO UPDATE SET payload_json=excluded.payload_json,revision=master_records.revision+1,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
@@ -381,6 +412,8 @@ def put_master(entity_type: str, entity_id: str, payload: dict[str, Any], user: 
 def delete_master(entity_type: str, entity_id: str, user: dict[str, Any] = Depends(require_roles("admin", "planner"))) -> dict[str, str]:
     if entity_type not in ENTITY_CONFIG:
         raise HTTPException(status_code=404, detail="未知主数据类型")
+    if entity_type == "calendar":
+        raise HTTPException(status_code=409, detail="机加、热表和装配日历为必需配置，请直接编辑现有日历")
     with db() as connection:
         cursor = connection.execute("DELETE FROM master_records WHERE entity_type=? AND entity_id=?", (entity_type, entity_id))
         if cursor.rowcount == 0:
@@ -436,10 +469,7 @@ def task_defaults(
     if schedule_type not in {"machining", "heat_treatment", "assembly"}:
         raise HTTPException(status_code=422, detail="schedule_type 不合法")
     with db() as connection:
-        row = connection.execute(
-            "SELECT payload_json FROM master_records WHERE entity_type='calendar' ORDER BY entity_id LIMIT 1"
-        ).fetchone()
-        calendar = json.loads(row["payload_json"]) if row else {}
+        calendar = select_calendar(connection, schedule_type)
         process_count = count_schedule_processes(connection, schedule_type)
     try:
         schedule_start = next_working_day_shift_start(calendar)
@@ -583,19 +613,21 @@ def get_version(version_id: str, _: dict[str, Any] = Depends(current_user)) -> d
 
 
 @app.post("/api/versions/{version_id}/review")
-def review_version(version_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(require_roles("admin", "approver"))) -> dict[str, str]:
+def review_version(version_id: str, payload: dict[str, Any], user: dict[str, Any] = Depends(require_roles("admin", "approver"))) -> dict[str, Any]:
     decision = str(payload.get("decision", "")).upper()
     if decision not in {"APPROVED", "REJECTED"}:
         raise HTTPException(status_code=422, detail="decision 必须为 APPROVED 或 REJECTED")
-    with db() as connection:
-        version = connection.execute("SELECT status FROM schedule_versions WHERE version_id=?", (version_id,)).fetchone()
-        if not version:
-            raise HTTPException(status_code=404, detail="排程版本不存在")
-        if version["status"] != "DRAFT":
-            raise HTTPException(status_code=409, detail="只有草稿版本可以审批")
-        connection.execute("UPDATE schedule_versions SET status=?,reviewed_by=?,reviewed_at=?,review_comment=? WHERE version_id=?", (decision, user["username"], now_text(), str(payload.get("comment", "")), version_id))
-        audit(connection, user["username"], f"VERSION_{decision}", "schedule_version", version_id, {"comment": payload.get("comment", "")})
-    return {"version_id": version_id, "status": decision}
+    try:
+        return review_schedule_version(
+            version_id,
+            decision,
+            user["username"],
+            str(payload.get("comment", "")),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/versions/{version_id}/publish")

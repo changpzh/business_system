@@ -1,4 +1,4 @@
-const state={token:localStorage.getItem('aps_token')||'',user:null,page:'dashboard',masterType:'order',masterRecords:[],versions:[],users:[],effectiveData:null,effectiveFilters:{},effectiveView:'order',lockTarget:null,dragAdjustment:null,pendingAdjustment:null};
+const state={token:localStorage.getItem('aps_token')||'',user:null,page:'dashboard',masterType:'order',masterOrderType:'machining',masterCalendarType:'machining',masterRecords:[],versions:[],users:[],effectiveData:null,effectiveFilters:{},effectiveView:'order',lockTarget:null,dragAdjustment:null,pendingAdjustment:null};
 const $=s=>document.querySelector(s); const content=$('#content');
 const labels={dashboard:['OPERATIONS CENTER','生产运营总览'],tasks:['SCHEDULING JOBS','排程任务中心'],versions:['PLAN GOVERNANCE','计划版本管理'],effective:['EFFECTIVE SCHEDULE','生效排程看板'],master:['MASTER DATA','主数据中心'],users:['ACCESS CONTROL','用户与权限'],audit:['AUDIT TRAIL','系统审计日志']};
 const entityLabels={order:'生产订单',machine:'设备档案',worker:'人员档案',resource_group:'资源组',calendar:'工厂日历'};
@@ -6,6 +6,9 @@ const batchEntityTypes=new Set(['order','machine','worker','resource_group']);
 const entityFileNames={order:'orders',machine:'machines',worker:'workers',resource_group:'resource_groups'};
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 function badge(v){return `<span class="badge ${esc(v)}"><i class="status-dot"></i>${esc(v)}</span>`}
+const processStatusLabels={PENDING:'待排程',SCHEDULED:'已排程',CONFIRMED:'已确认',IN_PROGRESS:'执行中',PAUSED:'已暂停',COMPLETED:'已完成',CANCELLED:'已取消'};
+function processStatusLabel(value){const status=String(value||'-').toUpperCase();return processStatusLabels[status]?`${processStatusLabels[status]}(${status})`:status}
+function processStatusBadge(value){const status=String(value||'-').toUpperCase();return `<span class="badge ${esc(status)}"><i class="status-dot"></i>${esc(processStatusLabel(status))}</span>`}
 function toast(msg,error=false){const el=$('#toast');el.textContent=msg;el.className='toast'+(error?' error':'');setTimeout(()=>el.classList.add('hidden'),3000)}
 async function api(path,options={}){const headers={'Content-Type':'application/json',...(options.headers||{})};if(state.token)headers.Authorization=`Bearer ${state.token}`;const res=await fetch(path,{...options,headers});let data=null;try{data=await res.json()}catch{}if(!res.ok){if(res.status===401&&path!='/api/auth/login')logout();throw new Error(data?.detail||`请求失败 ${res.status}`)}return data}
 function showModal(title,html){document.querySelector('.modal-card').classList.remove('plan-modal','task-modal','task-detail-modal','compare-modal');$('#modalTitle').textContent=title;$('#modalBody').innerHTML=html;$('#modal').classList.remove('hidden')}
@@ -45,7 +48,7 @@ async function renderEffectiveSchedule(){try{const filters=state.effectiveFilter
 function switchEffectiveView(kind,button){state.effectiveView=kind;document.querySelectorAll('[data-effective-tab]').forEach(item=>item.classList.toggle('active',item===button));document.querySelectorAll('[data-effective-view]').forEach(view=>view.classList.toggle('hidden',view.dataset.effectiveView!==kind))}
 function resetEffectiveFilters(){state.effectiveFilters={};renderEffectiveSchedule()}
 function exportEffectiveSchedule(){const data=state.effectiveData;if(!data)return;const rows=data.processes||[],blob=new Blob([JSON.stringify(rows,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`aps_effective_schedule_${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(a.href);toast(`已导出 ${rows.length} 道工序`)}
-function effectiveScheduleTable(rows){if(!rows.length)return '<div class="empty">当前筛选条件下没有工序</div>';return `<div class="table-wrap effective-table-wrap"><table class="data-table effective-table"><thead><tr><th>工序</th><th>生效状态</th><th>工序状态</th><th>订单</th><th>设备</th><th>人员</th><th>计划开始</th><th>计划完工</th><th>合批号</th><th>来源版本</th><th>异常</th></tr></thead><tbody>${rows.map(row=>`<tr class="${row.has_conflict?'conflict-row':''}"><td><b>${esc(row.process_id)}</b><div class="record-sub">${esc(row.process_name||'')}</div></td><td>${badge(row.schedule_state)}</td><td><div class="status-lock-cell">${badge(row.status||'-')}${lockMarker(row,true)}</div></td><td><b>${esc(row.order_id||'-')}</b><div class="record-sub">${esc(row.product_name||'')}</div></td><td>${esc(row.machine_id||'-')}<div class="record-sub">${esc(row.machine_name||'')}</div></td><td>${esc(row.worker_id||'-')}<div class="record-sub">${esc(row.worker_name||'')}</div></td><td>${esc(row.plan_start_time||'-')}</td><td>${esc(row.plan_end_time||'-')}</td><td class="mono">${esc(row.batch_id||'-')}</td><td>${row.schedule_version_id?`<button class="button ghost small mono" onclick="showVersion('${esc(row.schedule_version_id)}')">${esc(row.schedule_version_id)}</button>`:'-'}</td><td>${row.has_conflict?`<span class="effective-conflict-tag">${esc(row.conflict_types.join(' / '))} 冲突</span>`:'-'}</td></tr>`).join('')}</tbody></table></div>`}
+function effectiveScheduleTable(rows){if(!rows.length)return '<div class="empty">当前筛选条件下没有工序</div>';return `<div class="table-wrap effective-table-wrap"><table class="data-table effective-table"><thead><tr><th>工序</th><th>生效状态</th><th>工序状态</th><th>订单</th><th>设备</th><th>人员</th><th>计划开始</th><th>计划完工</th><th>合批号</th><th>来源版本</th><th>异常</th></tr></thead><tbody>${rows.map(row=>`<tr class="${row.has_conflict?'conflict-row':''}"><td><b>${esc(row.process_id)}</b><div class="record-sub">${esc(row.process_name||'')}</div></td><td>${badge(row.schedule_state)}</td><td><div class="status-lock-cell">${processStatusBadge(row.status||'-')}${lockMarker(row,true)}</div></td><td><b>${esc(row.order_id||'-')}</b><div class="record-sub">${esc(row.product_name||'')}</div></td><td>${esc(row.machine_id||'-')}<div class="record-sub">${esc(row.machine_name||'')}</div></td><td>${esc(row.worker_id||'-')}<div class="record-sub">${esc(row.worker_name||'')}</div></td><td>${esc(row.plan_start_time||'-')}</td><td>${esc(row.plan_end_time||'-')}</td><td class="mono">${esc(row.batch_id||'-')}</td><td>${row.schedule_version_id?`<button class="button ghost small mono" onclick="showVersion('${esc(row.schedule_version_id)}')">${esc(row.schedule_version_id)}</button>`:'-'}</td><td>${row.has_conflict?`<span class="effective-conflict-tag">${esc(row.conflict_types.join(' / '))} 冲突</span>`:'-'}</td></tr>`).join('')}</tbody></table></div>`}
 function effectiveConflictPanel(conflicts){return `<section class="panel effective-conflicts"><div class="panel-header"><div><h3>资源冲突明细</h3><p>合批号相同的并行工序不会被判定为冲突</p></div>${badge(`${conflicts.length} CONFLICTS`)}</div><div class="effective-conflict-list">${conflicts.map(item=>`<div><span>${item.resource_type==='machine'?'设备':'人员'} · ${esc(item.resource_id)}</span><strong>${esc(item.process_ids.join(' ↔ '))}</strong><small>${esc(item.start_time)} — ${esc(item.end_time)}</small></div>`).join('')}</div></section>`}
 function versionTable(rows){if(!rows.length)return '<div class="empty">暂无计划版本，请先执行排程任务</div>';return `<div class="table-wrap"><table class="data-table"><thead><tr><th>版本</th><th>工艺类型</th><th>来源任务</th><th>状态</th><th>创建时间</th><th>审批 / 发布</th><th></th></tr></thead><tbody>${rows.map(v=>`<tr><td><b>${esc(v.version_id)}</b><div class="record-sub">#${v.version_no}</div></td><td>${esc(v.schedule_type)}</td><td class="mono">${esc(v.task_id)}</td><td>${badge(v.status)}</td><td>${esc(v.created_at)}</td><td><div class="record-sub">${esc(v.reviewed_by||'-')} / ${esc(v.published_by||'-')}</div></td><td><button class="button ghost small" onclick="showVersion('${esc(v.version_id)}')">打开计划</button></td></tr>`).join('')}</tbody></table></div>`}
 async function showVersion(id){
@@ -85,9 +88,9 @@ function adjustmentImpactList(title,items){if(!items?.length)return '';return `<
 function openAdjustmentConfirmation(){const pending=state.pendingAdjustment;if(!pending)return;const {preview}=pending,target=preview.target,current=preview.current,hard=preview.hard_errors||[];if(hard.length){showModal('无法放置',`<div class="adjustment-blocked"><div class="adjustment-blocked-title">⛔ 工序 ${esc(preview.process_id)} 无法放置到目标位置</div>${adjustmentIssueList(hard,'hard')}${adjustmentIssueList(preview.warnings||[],'warning')}<div class="adjustment-suggestion"><strong>建议操作</strong><span>吸附到当前校验得到的最早可用边界，或返回甘特图调整前序/锁定任务。</span></div><div class="form-actions">${preview.snap_suggestion?'<button type="button" class="button secondary" onclick="applyAdjustmentSnap()">吸附到最早时间</button>':''}<button type="button" class="button ghost" data-close-modal>放弃</button></div></div>`);return}const direction=preview.operation==='move_forward'?'向前移动':preview.operation==='move_backward'?'向后移动':preview.operation==='machine_change'?'更换设备':preview.operation==='worker_change'?'更换人员':'调整资源和时间';const changeover=preview.changeover||{};showModal(`拖拽确认：${direction}`,`<form id="adjustmentConfirmForm"><div class="adjustment-confirm-head"><div><strong>${esc(preview.process_id)} · ${esc(preview.process_name||'')}</strong><span>订单 ${esc(preview.order_id||'-')}</span></div><span class="badge EFFECTIVE">${esc(direction)}</span></div><div class="adjustment-change-grid"><div><small>原时间</small><strong>${esc(current.plan_start_time)} — ${esc(current.plan_end_time)}</strong><span>${esc(current.machine_id)} / ${esc(current.worker_id)}</span></div><div><small>新时间</small><strong>${esc(target.plan_start_time)} — ${esc(target.plan_end_time)}</strong><span>${esc(target.machine_id)} / ${esc(target.worker_id)}</span></div></div>${adjustmentIssueList(preview.checks||[],'pass')}${adjustmentIssueList(preview.warnings||[],'warning')}${changeover.total_minutes?`<div class="adjustment-changeover"><strong>换产成本合计约 ${esc(changeover.total_minutes)} 分钟</strong><span>${esc((changeover.details||[]).join('；'))}</span></div>`:''}<div class="adjustment-impact-grid">${adjustmentImpactList('被挤任务',preview.displaced_tasks)}${adjustmentImpactList('后续工序',preview.downstream)}</div><div class="adjustment-options"><h4>调整方案</h4>${(preview.options||[]).map(option=>`<label><input type="radio" name="strategy" value="${esc(option.value)}" ${option.recommended?'checked':''}><span><strong>${esc(option.label)}${option.recommended?'（推荐）':''}</strong><small>${esc(option.description)}</small></span></label>`).join('')}</div><label class="adjustment-lock-after"><input type="checkbox" name="lock_after_adjustment"> 移动后锁定此任务</label><label class="adjustment-lock-reason hidden" id="adjustmentLockReason">锁定原因<input name="lock_reason" value="单工序调整确认后锁定" maxlength="500"></label><div class="form-actions"><button type="button" class="button ghost" data-close-modal>放弃</button><button class="button primary" type="submit">确认执行</button></div></form>`);document.querySelector('.modal-card').classList.add('task-modal');const form=$('#adjustmentConfirmForm'),lockBox=form.lock_after_adjustment;lockBox.onchange=()=>$('#adjustmentLockReason').classList.toggle('hidden',!lockBox.checked);form.onsubmit=executeConfirmedAdjustment}
 function applyAdjustmentSnap(){const pending=state.pendingAdjustment;if(!pending?.preview?.snap_suggestion)return;pending.payload.plan_start_time=pending.preview.snap_suggestion.plan_start_time;pending.payload.plan_end_time=pending.preview.snap_suggestion.plan_end_time;previewProcessAdjustment(pending.item,pending.payload)}
 async function executeConfirmedAdjustment(event){event.preventDefault();const pending=state.pendingAdjustment;if(!pending)return;const form=event.target,button=form.querySelector('[type=submit]'),fd=Object.fromEntries(new FormData(form));button.disabled=true;button.textContent='正在局部排程…';try{const result=await api(`/api/processes/${encodeURIComponent(pending.item.process_id)}/adjustments/execute`,{method:'POST',body:JSON.stringify({...pending.payload,...fd,confirm_warnings:true,lock_after_adjustment:form.lock_after_adjustment.checked})});state.pendingAdjustment=null;closeModal();toast(result.lock_warning?`调整已生效，但锁定失败：${result.lock_warning}`:`工序 ${result.process_id} 已调整并生效`);renderEffectiveSchedule()}catch(err){button.disabled=false;button.textContent='确认执行';toast(err.message,true)}}
-function scheduleTable(rows){return `<div class="table-wrap"><table class="data-table"><thead><tr><th>工序</th><th>状态</th><th>订单</th><th>设备</th><th>人员</th><th>开始</th><th>结束</th></tr></thead><tbody>${rows.map(x=>{const displayStatus=x.effective_status||x.status||x.source_status||'-';return `<tr><td><b>${esc(x.process_id)}</b><div class="record-sub">${esc(x.process_name||'')}</div></td><td><div class="status-lock-cell">${badge(displayStatus)}${lockMarker(x,true)}</div>${x.effective_status&&x.status&&x.effective_status!==x.status?`<div class="record-sub">算法状态 ${esc(x.status)}</div>`:''}${x.source_status&&x.source_status!==displayStatus?`<div class="record-sub">排程前状态 ${esc(x.source_status)}</div>`:''}</td><td>${esc(x.order_id||'')}</td><td>${esc(x.machine_id||'-')}</td><td>${esc(x.worker_id||'-')}</td><td>${esc(x.plan_start_time)}</td><td>${esc(x.plan_end_time)}</td></tr>`}).join('')}</tbody></table></div>`}
+function scheduleTable(rows){return `<div class="table-wrap"><table class="data-table"><thead><tr><th>工序</th><th>状态</th><th>订单</th><th>设备</th><th>人员</th><th>开始</th><th>结束</th></tr></thead><tbody>${rows.map(x=>{const displayStatus=x.effective_status||x.status||x.source_status||'-';return `<tr><td><b>${esc(x.process_id)}</b><div class="record-sub">${esc(x.process_name||'')}</div></td><td><div class="status-lock-cell">${processStatusBadge(displayStatus)}${lockMarker(x,true)}</div>${x.effective_status&&x.status&&x.effective_status!==x.status?`<div class="record-sub">算法状态 ${esc(processStatusLabel(x.status))}</div>`:''}${x.source_status&&x.source_status!==displayStatus?`<div class="record-sub">排程前状态 ${esc(processStatusLabel(x.source_status))}</div>`:''}</td><td>${esc(x.order_id||'')}</td><td>${esc(x.machine_id||'-')}</td><td>${esc(x.worker_id||'-')}</td><td>${esc(x.plan_start_time)}</td><td>${esc(x.plan_end_time)}</td></tr>`}).join('')}</tbody></table></div>`}
 function ganttScale(rows){const valid=rows.filter(x=>x.plan_start_time&&x.plan_end_time&&Number.isFinite(new Date(x.plan_start_time).getTime())&&Number.isFinite(new Date(x.plan_end_time).getTime()));if(!valid.length)return null;const min=Math.min(...valid.map(x=>new Date(x.plan_start_time).getTime())),max=Math.max(...valid.map(x=>new Date(x.plan_end_time).getTime())),span=Math.max(max-min,3600000),now=Date.now();const axis=Array.from({length:7},(_,i)=>{const t=min+span*i/6;return `<span style="left:${i/6*98}%">${new Date(t).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})}</span>`}).join(''),nowLine=now>=min&&now<=max?`<i class="gantt-now-line" style="left:${(now-min)/span*100}%" title="当前时间"></i>`:'';return{valid,min,max,span,axis,nowLine}}
-function ganttTooltipPayload(item){const materialTime=item.material_ready_time||((item.material_ready===true)?'已齐套（未提供具体时间）':(item.material_ready===false?'未齐套/未提供时间':'-'));const fields=[['订单号',item.order_id||'-'],['工序号',item.process_id||'-'],['工序状态',item.status||item.effective_status||'-'],['分配设备',item.machine_id||'-'],['分配工人',item.worker_id||'-'],['物料齐套时间',materialTime],['计划开始时间',item.plan_start_time||'-'],['计划完工时间',item.plan_end_time||'-']];if(item.batch_id)fields.push(['合批号',item.batch_id]);if(item.schedule_version_id||item.effective_schedule_version_id)fields.push(['生效版本',item.schedule_version_id||item.effective_schedule_version_id]);if(item.published_at)fields.push(['发布时间',item.published_at]);if(item.has_conflict)fields.push(['资源冲突',(item.conflict_types||[]).join(' / ')]);return encodeURIComponent(JSON.stringify(fields))}
+function ganttTooltipPayload(item){const materialTime=item.material_ready_time||((item.material_ready===true)?'已齐套（未提供具体时间）':(item.material_ready===false?'未齐套/未提供时间':'-'));const fields=[['订单号',item.order_id||'-'],['工序号',item.process_id||'-'],['工序状态',processStatusLabel(item.status||item.effective_status||'-')],['分配设备',item.machine_id||'-'],['分配工人',item.worker_id||'-'],['物料齐套时间',materialTime],['计划开始时间',item.plan_start_time||'-'],['计划完工时间',item.plan_end_time||'-']];if(item.batch_id)fields.push(['合批号',item.batch_id]);if(item.schedule_version_id||item.effective_schedule_version_id)fields.push(['生效版本',item.schedule_version_id||item.effective_schedule_version_id]);if(item.published_at)fields.push(['发布时间',item.published_at]);if(item.has_conflict)fields.push(['资源冲突',(item.conflict_types||[]).join(' / ')]);return encodeURIComponent(JSON.stringify(fields))}
 function safeClassToken(value){return String(value||'').replace(/[^a-zA-Z0-9_-]/g,'-')}
 function ganttBar(item,scale,extraClass='',showTooltip=true,manualLockMenu=false){const start=new Date(item.plan_start_time).getTime(),end=new Date(item.plan_end_time).getTime(),left=(start-scale.min)/scale.span*100,width=Math.max((end-start)/scale.span*100,.7),tooltip=showTooltip&&item.process_id?` data-tooltip="${ganttTooltipPayload(item)}" onmouseenter="showGanttTooltip(event,this)" onmousemove="moveGanttTooltip(event)" onmouseleave="hideGanttTooltip()"`:'',menuEnabled=manualLockMenu&&(item.allow_manual_lock||item.allow_manual_adjustment),context=menuEnabled?` oncontextmenu="openProcessContextMenu(event,'${processLockPayload(item)}')"`:'',adjustable=manualLockMenu&&item.allow_manual_adjustment&&extraClass!=='gantt-process-bar',drag=adjustable?` draggable="true" ondragstart="startGanttAdjustmentDrag(event,'${processLockPayload(item)}')" ondragend="endGanttAdjustmentDrag()"`:'';return `<div class="gantt-bar ${extraClass} ${adjustable?'gantt-bar-adjustable':''} gantt-status-${safeClassToken(item.status)} ${item.manually_locked?'gantt-bar-locked':''} ${item.has_conflict?'gantt-bar-conflict':''}" style="left:${left}%;width:${width}%"${tooltip}${context}${drag}><span>${esc(item.process_id||item.order_id)}</span>${lockMarker(item)}</div>`}
 function showGanttTooltip(event,element){const tooltip=$('#ganttTooltip');let fields=[];try{fields=JSON.parse(decodeURIComponent(element.dataset.tooltip||''))}catch{}tooltip.innerHTML=fields.map(([label,value])=>`<div class="gantt-tooltip-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');tooltip.classList.remove('hidden');moveGanttTooltip(event)}
@@ -174,6 +177,11 @@ const orderMasterTypes=[
     {value:'heat_treatment',label:'热表订单'},
     {value:'assembly',label:'装配订单'}
 ];
+const calendarMasterTypes=[
+    {value:'machining',label:'机加日历'},
+    {value:'heat_treatment',label:'热表日历'},
+    {value:'assembly',label:'装配日历'}
+];
 const orderResourceTypeMapping={
     MACHINING:'machining',
     HEAT_TREAT:'heat_treatment',
@@ -185,6 +193,19 @@ state.masterResourceGroups=state.masterResourceGroups||[];
 
 function orderMasterTypeLabel(value){
     return orderMasterTypes.find(item=>item.value===value)?.label||value;
+}
+
+function calendarMasterTypeLabel(value){
+    return calendarMasterTypes.find(item=>item.value===value)?.label||value;
+}
+
+function calendarScheduleType(record){
+    const explicit=String(record?.schedule_type||'').toLowerCase();
+    if(calendarMasterTypes.some(item=>item.value===explicit))return explicit;
+    const marker=(String(record?.calendar_id||'')+' '+String(record?.calendar_name||'')).toUpperCase();
+    if(marker.includes('HEAT')||marker.includes('热'))return 'heat_treatment';
+    if(marker.includes('ASSEMBLY')||marker.includes('装配'))return 'assembly';
+    return 'machining';
 }
 
 function orderProcessScheduleTypes(record){
@@ -230,8 +251,9 @@ function ensureOrderScope(record,scheduleType){
 }
 
 function visibleMasterRecords(){
-    if(state.masterType!=='order')return state.masterRecords;
-    return state.masterRecords.filter(row=>orderScheduleType(row.payload)===state.masterOrderType);
+    if(state.masterType==='order')return state.masterRecords.filter(row=>orderScheduleType(row.payload)===state.masterOrderType);
+    if(state.masterType==='calendar')return state.masterRecords.filter(row=>calendarScheduleType(row.payload)===state.masterCalendarType);
+    return state.masterRecords;
 }
 
 function orderMasterTabsHtml(){
@@ -240,6 +262,15 @@ function orderMasterTabsHtml(){
         const count=state.masterRecords.filter(row=>orderScheduleType(row.payload)===option.value).length;
         const active=option.value===state.masterOrderType?' active':'';
         return '<button type="button" data-order-type="'+esc(option.value)+'" class="order-type-tab '+esc(option.value)+active+'"><span>'+esc(option.label)+'</span><b>'+count+'</b></button>';
+    }).join('')+'</div>';
+}
+
+function calendarMasterTabsHtml(){
+    if(state.masterType!=='calendar')return '';
+    return '<div class="order-type-tabs calendar-type-tabs">'+calendarMasterTypes.map(option=>{
+        const count=state.masterRecords.filter(row=>calendarScheduleType(row.payload)===option.value).length;
+        const active=option.value===state.masterCalendarType?' active':'';
+        return '<button type="button" data-calendar-type="'+esc(option.value)+'" class="order-type-tab '+esc(option.value)+active+'"><span>'+esc(option.label)+'</span><b>'+count+'</b></button>';
     }).join('')+'</div>';
 }
 
@@ -257,9 +288,13 @@ async function renderMasterByOrderType(){
             '<button class="'+(key===state.masterType?'active':'')+'" onclick="switchMaster(\''+esc(key)+'\')">'+esc(label)+'</button>'
         ).join('');
         const visible=visibleMasterRecords();
-        const recordActions='<div class="toolbar master-toolbar"><input id="masterSearch" class="search" placeholder="搜索编号或名称…"><div class="toolbar-group">'+batchActions+'<button class="button primary" onclick="newMaster()">＋ 新建记录</button></div></div>';
-        const recordToolbar=state.masterType==='order'
-            ?'<div class="master-record-toolbar">'+orderMasterTabsHtml()+recordActions+'</div>'
+        const newRecordAction=state.masterType==='calendar'&&visible.length
+            ?''
+            :'<button class="button primary" onclick="newMaster()">＋ 新建记录</button>';
+        const recordActions='<div class="toolbar master-toolbar"><input id="masterSearch" class="search" placeholder="搜索编号或名称…"><div class="toolbar-group">'+batchActions+newRecordAction+'</div></div>';
+        const scopeTabs=state.masterType==='order'?orderMasterTabsHtml():calendarMasterTabsHtml();
+        const recordToolbar=['order','calendar'].includes(state.masterType)
+            ?'<div class="master-record-toolbar">'+scopeTabs+recordActions+'</div>'
             :recordActions;
         content.innerHTML='<section class="panel">'
             +'<div class="master-header"><div class="tabs">'+masterTabs+'</div>'
@@ -269,6 +304,12 @@ async function renderMasterByOrderType(){
         document.querySelectorAll('[data-order-type]').forEach(button=>{
             button.onclick=()=>switchOrderType(button.dataset.orderType);
         });
+        document.querySelectorAll('[data-calendar-type]').forEach(button=>{
+            button.onclick=()=>switchCalendarType(button.dataset.calendarType);
+        });
+        if(state.masterType==='calendar'){
+            document.querySelectorAll('#masterTable .button.danger').forEach(button=>button.remove());
+        }
         $('#masterSearch').oninput=event=>{
             const keyword=event.target.value.toLowerCase();
             $('#masterTable').innerHTML=masterTable(
@@ -287,8 +328,39 @@ function switchOrderType(scheduleType){
     renderMaster();
 }
 
+function switchCalendarType(scheduleType){
+    if(!calendarMasterTypes.some(item=>item.value===scheduleType))return;
+    state.masterCalendarType=scheduleType;
+    renderMaster();
+}
+
 const defaultRecordBase=defaultRecord;
+function defaultCalendarWeeklyShifts(scheduleType){
+    if(scheduleType==='heat_treatment'){
+        return Object.fromEntries(Array.from({length:7},(_,day)=>[String(day),[{name:'continuous',segments:[{start:'00:00',end:'00:00',capacity_factor:1}]}]]));
+    }
+    return Object.fromEntries(Array.from({length:7},(_,day)=>[
+        String(day),
+        day===0?[]:[{name:'day',segments:[{start:'08:00',end:'12:00',capacity_factor:1},{start:'13:00',end:'17:00',capacity_factor:1}]}]
+    ]));
+}
 function defaultRecordByOrderType(){
+    if(state.masterType==='calendar'){
+        const scheduleType=state.masterCalendarType;
+        const prefixes={machining:'NEW_MACHINING_CALENDAR',heat_treatment:'NEW_HEAT_CALENDAR',assembly:'NEW_ASSEMBLY_CALENDAR'};
+        return {
+            calendar_id:prefixes[scheduleType],
+            calendar_name:calendarMasterTypeLabel(scheduleType),
+            schedule_type:scheduleType,
+            calendar_level:'WORKSHOP',
+            time_zone:'Asia/Shanghai',
+            day_shift_start:'08:00',
+            status:'ACTIVE',
+            weekly_shifts:defaultCalendarWeeklyShifts(scheduleType),
+            special_shifts:{},
+            special_rules:[]
+        };
+    }
     if(state.masterType!=='order')return defaultRecordBase();
     const prefixes={machining:'NEW_MC_ORDER',heat_treatment:'NEW_HEAT_ORDER',assembly:'NEW_ASM_ORDER'};
     return {
@@ -317,6 +389,30 @@ recordSub=recordSubWithProcessCount;
 
 const openMasterEditorBase=openMasterEditor;
 function openMasterEditorByOrderType(record,isNew){
+    if(state.masterType==='calendar'){
+        openMasterEditorBase({...record,schedule_type:state.masterCalendarType},isNew);
+        $('#modalTitle').textContent=(isNew?'新建':'编辑')+calendarMasterTypeLabel(state.masterCalendarType);
+        const form=$('#masterForm');
+        const baseSubmit=form.onsubmit;
+        form.onsubmit=event=>{
+            try{
+                const textarea=form.querySelector('[name="json"]');
+                const parsed=JSON.parse(textarea.value);
+                const explicit=String(parsed.schedule_type||'').toLowerCase();
+                if(explicit&&explicit!==state.masterCalendarType){
+                    throw new Error('日历声明类型与当前“'+calendarMasterTypeLabel(state.masterCalendarType)+'”不一致');
+                }
+                parsed.schedule_type=state.masterCalendarType;
+                textarea.value=JSON.stringify(parsed,null,2);
+            }catch(error){
+                event.preventDefault();
+                toast(error.message,true);
+                return;
+            }
+            return baseSubmit.call(form,event);
+        };
+        return;
+    }
     if(state.masterType!=='order'){
         openMasterEditorBase(record,isNew);
         return;

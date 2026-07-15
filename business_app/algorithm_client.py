@@ -47,5 +47,13 @@ class AlgorithmClient:
         endpoint = "/api/v1/schedules/local-adjust" if payload.get("mode") == "local" else "/api/v1/schedules/execute"
         return self._json_request(endpoint, method="POST", payload=payload)
 
+    def validate_process_constraints(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._json_request(
+            "/api/v1/constraints/process/validate",
+            method="POST",
+            payload=payload,
+            timeout=min(settings.algorithm_timeout_seconds, 30),
+        )
+
 
 algorithm_client = AlgorithmClient()

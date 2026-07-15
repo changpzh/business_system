@@ -5,7 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -16,6 +16,7 @@ os.environ["SESSION_SECRET"] = "test-secret"
 from fastapi.testclient import TestClient
 
 from business_app.algorithm_client import algorithm_client
+from business_app.database import db, now_text
 from business_app.main import app
 from business_app.services import (
     _detect_schedule_conflicts,
@@ -25,6 +26,7 @@ from business_app.services import (
     ga_parameters_for_process_count,
     is_manually_locked,
     next_working_day_shift_start,
+    select_calendar,
 )
 
 
@@ -33,12 +35,62 @@ class BusinessSystemTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.client_context = TestClient(app)
         cls.client = cls.client_context.__enter__()
+        cls.original_constraint_validator = algorithm_client.validate_process_constraints
+
+        def fake_constraint_validator(payload):
+            process = next(
+                (
+                    item
+                    for order in payload["data_snapshot"].get("order_processes", [])
+                    for item in order.get("processes", [])
+                    if str(item.get("process_id")) == str(payload.get("process_id"))
+                ),
+                {},
+            )
+            required_minutes = float(
+                payload.get("duration_minutes")
+                or process.get("unit_duration_minutes")
+                or 0
+            )
+            issues = []
+            start_value = payload.get("plan_start_time")
+            end_value = payload.get("plan_end_time")
+            if start_value and end_value:
+                start = datetime.fromisoformat(str(start_value))
+                end = datetime.fromisoformat(str(end_value))
+                if end <= start or (end - start).total_seconds() / 60 + 1e-6 < required_minutes:
+                    issues.append(
+                        {
+                            "code": "PROCESS_DURATION_SHORTAGE",
+                            "title": "工时不足",
+                            "message": "目标时段不足",
+                            "severity": "hard",
+                        }
+                    )
+            suggested_window = None
+            if payload.get("find_window_from") and not issues:
+                suggested_start = datetime.fromisoformat(str(payload["find_window_from"]))
+                suggested_end = suggested_start + timedelta(minutes=required_minutes)
+                suggested_window = {
+                    "plan_start_time": suggested_start.isoformat(timespec="seconds"),
+                    "plan_end_time": suggested_end.isoformat(timespec="seconds"),
+                }
+            return {
+                "valid": not issues,
+                "issues": issues,
+                "required_minutes": required_minutes,
+                "requires_continuous": payload.get("schedule_type") == "heat_treatment",
+                "suggested_window": suggested_window,
+            }
+
+        algorithm_client.validate_process_constraints = fake_constraint_validator
         response = cls.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
         assert response.status_code == 200, response.text
         cls.headers = {"Authorization": f"Bearer {response.json()['token']}"}
 
     @classmethod
     def tearDownClass(cls) -> None:
+        algorithm_client.validate_process_constraints = cls.original_constraint_validator
         cls.client_context.__exit__(None, None, None)
         TEMP_DIR.cleanup()
 
@@ -49,6 +101,15 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(dashboard.json()["master_counts"]["order"], 3)
         snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
         self.assertEqual(len(snapshot["machine_profiles"]), 3)
+        self.assertEqual(
+            {item["schedule_type"] for item in snapshot["machine_calendars"]},
+            {"machining", "heat_treatment", "assembly"},
+        )
+        calendar_id = snapshot["machine_calendar"]["calendar_id"]
+        self.assertEqual(
+            self.client.delete(f"/api/master-data/calendar/{calendar_id}", headers=self.headers).status_code,
+            409,
+        )
         validation = self.client.get("/api/master-data/validate", headers=self.headers).json()
         self.assertTrue(validation["valid"], validation["errors"])
 
@@ -78,6 +139,30 @@ class BusinessSystemTests(unittest.TestCase):
         }
         result = next_working_day_shift_start(calendar, datetime(2026, 7, 19, 10, 0))
         self.assertEqual(result, datetime(2026, 7, 20, 8, 30))
+
+    def test_calendar_selection_uses_schedule_type(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE master_records(entity_type TEXT,entity_id TEXT,payload_json TEXT)"
+        )
+        for schedule_type, start in (
+            ("machining", "08:00"),
+            ("heat_treatment", "00:00"),
+            ("assembly", "09:00"),
+        ):
+            payload = {
+                "calendar_id": f"CAL_{schedule_type}",
+                "schedule_type": schedule_type,
+                "weekly_shifts": {"1": [{"segments": [{"start": start, "end": "17:00"}]}]},
+            }
+            connection.execute(
+                "INSERT INTO master_records VALUES('calendar',?,?)",
+                (payload["calendar_id"], json.dumps(payload)),
+            )
+        self.assertEqual(select_calendar(connection, "heat_treatment")["calendar_id"], "CAL_heat_treatment")
+        self.assertEqual(select_calendar(connection, "assembly")["calendar_id"], "CAL_assembly")
+        connection.close()
 
     def test_ga_parameters_follow_process_scale_boundaries(self) -> None:
         expectations = {
@@ -187,6 +272,17 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertIn("function switchOrderType", app_js)
         self.assertIn("data-order-type", app_js)
         self.assertIn(".order-type-tabs", styles)
+
+    def test_calendar_master_data_has_three_scoped_calendar_tabs(self) -> None:
+        app_js = (Path(__file__).parents[1] / "business_app" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        for label in ("机加日历", "热表日历", "装配日历"):
+            self.assertIn(label, app_js)
+        self.assertIn("function calendarScheduleType", app_js)
+        self.assertIn("function switchCalendarType", app_js)
+        self.assertIn("data-calendar-type", app_js)
+        self.assertIn("defaultCalendarWeeklyShifts", app_js)
 
     def test_version_comparison_returns_core_metric_trends(self) -> None:
         left = {
@@ -434,6 +530,7 @@ class BusinessSystemTests(unittest.TestCase):
                             "worker_id": "DEMO_W_MC",
                             "plan_start_time": "2026-07-14T08:00:00",
                             "plan_end_time": "2026-07-14T13:00:00",
+                            "status": "PENDING",
                         }
                     ],
                     "kpis": {"makespan_hours": 5},
@@ -487,12 +584,16 @@ class BusinessSystemTests(unittest.TestCase):
         )
         self.assertFalse(version_detail["result"]["schedule"][0]["manually_locked"])
         self.assertEqual(version_detail["result"]["schedule"][0]["lock_details"], {})
+        self.assertEqual(version_detail["result"]["schedule"][0]["status"], "PENDING")
         reviewed = self.client.post(
             f"/api/versions/{version_id}/review",
             json={"decision": "APPROVED", "comment": "测试审批"},
             headers=self.headers,
         )
         self.assertEqual(reviewed.json()["status"], "APPROVED")
+        self.assertEqual(reviewed.json()["process_status"], "SCHEDULED")
+        approved_detail = self.client.get(f"/api/versions/{version_id}", headers=self.headers).json()
+        self.assertEqual(approved_detail["result"]["schedule"][0]["status"], "SCHEDULED")
         published = self.client.post(f"/api/versions/{version_id}/publish", headers=self.headers)
         self.assertEqual(published.json()["updated_processes"], 1)
 
@@ -504,6 +605,7 @@ class BusinessSystemTests(unittest.TestCase):
 
         published_detail = self.client.get(f"/api/versions/{version_id}", headers=self.headers).json()
         published_process = published_detail["result"]["schedule"][0]
+        self.assertEqual(published_process["status"], "CONFIRMED")
         self.assertEqual(published_process["effective_status"], "CONFIRMED")
         self.assertEqual(published_process["effective_schedule_version_id"], version_id)
         self.assertTrue(published_process["is_effective_version"])
@@ -581,6 +683,59 @@ class BusinessSystemTests(unittest.TestCase):
         )
         self.assertEqual(unlocked.status_code, 200, unlocked.text)
         self.assertEqual(unlocked.json()["locks"], {})
+
+    def test_rejected_draft_keeps_processes_pending(self) -> None:
+        task_id = "TEST-REJECTED-STATE-TASK"
+        version_id = "PLAN-TEST-REJECTED-STATE"
+        stamp = now_text()
+        result = {
+            "schedule": [
+                {
+                    "order_id": "DEMO_MC_ORDER",
+                    "process_id": "DEMO_MC_P10",
+                    "status": "PENDING",
+                    "machine_id": "DEMO_MC_01",
+                    "worker_id": "DEMO_W_MC",
+                    "plan_start_time": "2026-07-20T08:00:00",
+                    "plan_end_time": "2026-07-20T12:00:00",
+                }
+            ]
+        }
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO schedule_tasks(task_id,schedule_type,mode,dispatching_rule,status,request_json,"
+                "snapshot_json,response_json,created_by,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    task_id,
+                    "machining",
+                    "static",
+                    "DELIVERY",
+                    "SUCCEEDED",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "admin",
+                    stamp,
+                    stamp,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO schedule_versions(version_id,version_no,task_id,schedule_type,status,result_json,"
+                "created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (version_id, 9999, task_id, "machining", "DRAFT", json.dumps(result), "admin", stamp),
+            )
+
+        rejected = self.client.post(
+            f"/api/versions/{version_id}/review",
+            json={"decision": "REJECTED", "comment": "参数需要调整"},
+            headers=self.headers,
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["status"], "REJECTED")
+        self.assertEqual(rejected.json()["process_status"], "PENDING")
+        self.assertEqual(rejected.json()["updated_processes"], 0)
+        detail = self.client.get(f"/api/versions/{version_id}", headers=self.headers).json()
+        self.assertEqual(detail["result"]["schedule"][0]["status"], "PENDING")
 
     def test_z_single_operation_adjustment_preview_and_execute(self) -> None:
         preview_payload = {

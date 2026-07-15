@@ -116,6 +116,81 @@ def audit(connection: sqlite3.Connection, actor: str, action: str, target_type: 
     )
 
 
+def _ensure_schedule_type_calendars(connection: sqlite3.Connection, stamp: str) -> None:
+    rows = connection.execute(
+        "SELECT entity_id,payload_json FROM master_records WHERE entity_type='calendar' ORDER BY entity_id"
+    ).fetchall()
+    if not rows:
+        return
+    records = [(str(row["entity_id"]), json.loads(row["payload_json"])) for row in rows]
+    valid_types = {"machining", "heat_treatment", "assembly"}
+    typed = {
+        str(payload.get("schedule_type") or "").lower(): (entity_id, payload)
+        for entity_id, payload in records
+        if str(payload.get("schedule_type") or "").lower() in valid_types
+    }
+    legacy = next(((entity_id, payload) for entity_id, payload in records if not payload.get("schedule_type")), None)
+    if "machining" not in typed and legacy:
+        entity_id, payload = legacy
+        payload = {**payload, "schedule_type": "machining"}
+        connection.execute(
+            "UPDATE master_records SET payload_json=?,revision=revision+1,updated_by=?,updated_at=? "
+            "WHERE entity_type='calendar' AND entity_id=?",
+            (json.dumps(payload, ensure_ascii=False), "system", stamp, entity_id),
+        )
+        typed["machining"] = (entity_id, payload)
+
+    source_id, source = next(iter(typed.values()), records[0])
+    existing_ids = {entity_id for entity_id, _payload in records}
+    labels = {"machining": "机加日历", "heat_treatment": "热表日历", "assembly": "装配日历"}
+    suffixes = {"machining": "MACHINING", "heat_treatment": "HEAT_TREATMENT", "assembly": "ASSEMBLY"}
+    created: list[str] = []
+    for schedule_type in ("machining", "heat_treatment", "assembly"):
+        if schedule_type in typed:
+            continue
+        base_id = f"{source_id}_{suffixes[schedule_type]}"
+        calendar_id = base_id
+        index = 2
+        while calendar_id in existing_ids:
+            calendar_id = f"{base_id}_{index}"
+            index += 1
+        clone = {
+            **source,
+            "calendar_id": calendar_id,
+            "calendar_name": labels[schedule_type],
+            "schedule_type": schedule_type,
+        }
+        if schedule_type == "heat_treatment":
+            clone["day_shift_start"] = "08:00"
+            clone["weekly_shifts"] = {
+                str(day): [
+                    {
+                        "name": "continuous",
+                        "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}],
+                    }
+                ]
+                for day in range(7)
+            }
+            clone["special_shifts"] = {}
+            clone["special_rules"] = []
+        connection.execute(
+            "INSERT INTO master_records(entity_type,entity_id,payload_json,revision,updated_by,updated_at) "
+            "VALUES('calendar',?,?,?,?,?)",
+            (calendar_id, json.dumps(clone, ensure_ascii=False), 1, "system", stamp),
+        )
+        existing_ids.add(calendar_id)
+        created.append(calendar_id)
+    if created:
+        audit(
+            connection,
+            "system",
+            "SCHEDULE_TYPE_CALENDARS_INITIALIZED",
+            "calendar",
+            "schedule_types",
+            {"created": created},
+        )
+
+
 def initialize_database() -> None:
     with db() as connection:
         connection.executescript(SCHEMA)
@@ -157,3 +232,4 @@ def initialize_database() -> None:
                         (entity_type, record[id_field], json.dumps(record, ensure_ascii=False), 1, "system", stamp),
                     )
             audit(connection, "system", "DEMO_DATA_INITIALIZED", "system", "master_data")
+        _ensure_schedule_type_calendars(connection, stamp)
