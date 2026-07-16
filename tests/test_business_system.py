@@ -16,6 +16,7 @@ os.environ["SESSION_SECRET"] = "test-secret"
 from fastapi.testclient import TestClient
 
 from business_app.algorithm_client import algorithm_client
+from business_app.constants import ADJUSTMENT_CODE_PAST_TIME
 from business_app.database import db, initialize_database, now_text
 from business_app.main import app
 from business_app.services import (
@@ -897,7 +898,10 @@ class BusinessSystemTests(unittest.TestCase):
         )
         self.assertEqual(past_preview.status_code, 200, past_preview.text)
         self.assertFalse(past_preview.json()["can_execute"])
-        self.assertIn("F-07", {item["code"] for item in past_preview.json()["hard_errors"]})
+        self.assertIn(
+            ADJUSTMENT_CODE_PAST_TIME,
+            {item["code"] for item in past_preview.json()["hard_errors"]},
+        )
 
         original_execute = algorithm_client.execute
         captured_payload = {}

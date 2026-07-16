@@ -24,6 +24,7 @@ from .constants import (
     ADJUSTMENT_CODE_PROCESS_CONSTRAINT,
     ADJUSTMENT_CODE_TOOLING_CHANGE,
     ADJUSTMENT_CODE_WORKER_CONFLICT,
+    ADJUSTMENT_CODE_WORKER_LOCK_CONFLICT,
     CHANGE_TYPE_ADDED,
     CHANGE_TYPE_MODIFIED,
     CHANGE_TYPE_REMOVED,
@@ -110,10 +111,6 @@ BATCH_METADATA_FIELDS = (
     "batch_capacity_volume",
     "batch_merge_allowed",
 )
-
-
-def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return dict(row) if row else None
 
 
 def parse_json_columns(record: dict[str, Any] | None, *columns: str) -> dict[str, Any] | None:
@@ -775,7 +772,7 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
             code = (
                 ADJUSTMENT_CODE_MACHINE_LOCK_CONFLICT
                 if shares_machine
-                else ADJUSTMENT_CODE_WORKER_CONFLICT
+                else ADJUSTMENT_CODE_WORKER_LOCK_CONFLICT
             )
             hard_errors.append(
                 _adjustment_issue(

@@ -254,13 +254,6 @@ function calendarScheduleType(record){
     return calendarMasterTypes.some(item=>item.value===explicit)?explicit:'';
 }
 
-function orderProcessScheduleTypes(record){
-    const types=new Set();
-    const scheduleType=orderBusinessTypeMapping[String(record?.order_business_type||'').toUpperCase()];
-    if(scheduleType)types.add(scheduleType);
-    return types;
-}
-
 function orderScheduleType(record){
     return orderBusinessTypeMapping[String(record?.order_business_type||'').toUpperCase()]||'';
 }
