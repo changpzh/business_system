@@ -1,8 +1,128 @@
 {
-  "machine_calendar": {
-    "calendar_id": "SHOP_CALENDAR",
-    "calendar_name": "标准工厂日历",
+  "machine_calendars": [
+  {
+    "calendar_id": "SHOP_CALENDAR_MACHINING",
+    "calendar_name": "机加日历",
+    "schedule_type": "machining",
     "time_zone": "Asia/Shanghai",
+    "status": "ACTIVE",
+    "weekly_shifts": {
+      "0": [],
+      "1": [
+        {
+          "name": "白班",
+          "segments": [
+            {
+              "start": "08:00",
+              "end": "12:00",
+              "capacity_factor": 1.0
+            },
+            {
+              "start": "13:00",
+              "end": "17:00",
+              "capacity_factor": 1.0
+            }
+          ]
+        }
+      ],
+      "2": [
+        {
+          "name": "白班",
+          "segments": [
+            {
+              "start": "08:00",
+              "end": "12:00",
+              "capacity_factor": 1.0
+            },
+            {
+              "start": "13:00",
+              "end": "17:00",
+              "capacity_factor": 1.0
+            }
+          ]
+        }
+      ],
+      "3": [
+        {
+          "name": "白班",
+          "segments": [
+            {
+              "start": "08:00",
+              "end": "12:00",
+              "capacity_factor": 1.0
+            },
+            {
+              "start": "13:00",
+              "end": "17:00",
+              "capacity_factor": 1.0
+            }
+          ]
+        }
+      ],
+      "4": [
+        {
+          "name": "白班",
+          "segments": [
+            {
+              "start": "08:00",
+              "end": "12:00",
+              "capacity_factor": 1.0
+            },
+            {
+              "start": "13:00",
+              "end": "17:00",
+              "capacity_factor": 1.0
+            }
+          ]
+        }
+      ],
+      "5": [
+        {
+          "name": "白班",
+          "segments": [
+            {
+              "start": "08:00",
+              "end": "12:00",
+              "capacity_factor": 1.0
+            },
+            {
+              "start": "13:00",
+              "end": "17:00",
+              "capacity_factor": 1.0
+            }
+          ]
+        }
+      ],
+      "6": []
+    },
+    "special_shifts": {},
+    "special_rules": []
+  },
+  {
+    "calendar_id": "SHOP_CALENDAR_HEAT_TREATMENT",
+    "calendar_name": "热表连续日历",
+    "schedule_type": "heat_treatment",
+    "time_zone": "Asia/Shanghai",
+    "day_shift_start": "08:00",
+    "status": "ACTIVE",
+    "weekly_shifts": {
+      "0": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}],
+      "1": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}],
+      "2": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}],
+      "3": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}],
+      "4": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}],
+      "5": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}],
+      "6": [{"name": "连续生产", "segments": [{"start": "00:00", "end": "00:00", "capacity_factor": 1.0}]}]
+    },
+    "special_shifts": {},
+    "special_rules": []
+  },
+  {
+    "calendar_id": "SHOP_CALENDAR_ASSEMBLY",
+    "calendar_name": "装配日历",
+    "schedule_type": "assembly",
+    "time_zone": "Asia/Shanghai",
+    "day_shift_start": "08:00",
     "status": "ACTIVE",
     "weekly_shifts": {
       "0": [],
@@ -15,25 +135,315 @@
     },
     "special_shifts": {},
     "special_rules": []
-  },
+  }
+  ],
   "machine_profiles": [
-    {"machine_id": "DEMO_MC_01", "machine_name": "演示加工中心", "machine_type": "加工中心", "workshop_type": "MACHINING", "status": "ACTIVE", "capabilities": {}, "unavailability": [], "availability_overrides": []},
-    {"machine_id": "DEMO_FURNACE_01", "machine_name": "演示真空炉", "machine_type": "真空炉", "workshop_type": "HEAT_TREAT", "status": "ACTIVE", "max_volume_l": 500, "cooling_methods": ["N2_GAS_QUENCH"], "capabilities": {}, "unavailability": [], "availability_overrides": []},
-    {"machine_id": "DEMO_ASM_01", "machine_name": "演示装配工位", "machine_type": "装配工位", "workshop_type": "ASSEMBLY", "status": "ACTIVE", "capabilities": {}, "unavailability": [], "availability_overrides": []}
+    {
+      "machine_id": "DEMO_MC_01",
+      "machine_name": "演示加工中心",
+      "machine_type": "加工中心",
+      "workshop_type": "MACHINING",
+      "status": "ACTIVE",
+      "capabilities": {},
+      "unavailability": [],
+      "availability_overrides": []
+    },
+    {
+      "machine_id": "DEMO_FURNACE_01",
+      "machine_name": "演示真空炉",
+      "machine_type": "真空炉",
+      "workshop_type": "HEAT_TREAT",
+      "status": "ACTIVE",
+      "max_volume_l": 500,
+      "cooling_methods": [
+        "N2_GAS_QUENCH"
+      ],
+      "capabilities": {},
+      "unavailability": [],
+      "availability_overrides": []
+    },
+    {
+      "machine_id": "DEMO_ASM_01",
+      "machine_name": "演示装配工位",
+      "machine_type": "装配工位",
+      "workshop_type": "ASSEMBLY",
+      "status": "ACTIVE",
+      "capabilities": {},
+      "unavailability": [],
+      "availability_overrides": []
+    },
+    {
+      "machine_id": "DEMO_VIRTUAL_HEAT_MACHINE",
+      "machine_name": "??????????",
+      "machine_type": "VIRTUAL",
+      "workshop_type": "HEAT_TREAT",
+      "virtual_resource": true,
+      "status": "ACTIVE",
+      "capabilities": {},
+      "unavailability": [],
+      "availability_overrides": []
+    }
   ],
   "worker_profiles": [
-    {"worker_id": "DEMO_W_MC", "worker_name": "加工操作员", "skill_level": "senior", "skill_efficiency": 1.0, "workshop_type": "MACHINING", "status": "ACTIVE", "unavailability": [], "availability_overrides": []},
-    {"worker_id": "DEMO_W_HEAT", "worker_name": "热处理操作员", "skill_level": "senior", "skill_efficiency": 1.0, "workshop_type": "HEAT_TREAT", "status": "ACTIVE", "unavailability": [], "availability_overrides": []},
-    {"worker_id": "DEMO_W_ASM", "worker_name": "装配操作员", "skill_level": "senior", "skill_efficiency": 1.0, "workshop_type": "ASSEMBLY", "status": "ACTIVE", "unavailability": [], "availability_overrides": []}
+    {
+      "worker_id": "DEMO_W_MC",
+      "worker_name": "加工操作员",
+      "skill_level": "senior",
+      "skill_efficiency": 1.0,
+      "workshop_type": "MACHINING",
+      "status": "ACTIVE",
+      "unavailability": [],
+      "availability_overrides": []
+    },
+    {
+      "worker_id": "DEMO_W_HEAT",
+      "worker_name": "热处理操作员",
+      "skill_level": "senior",
+      "skill_efficiency": 1.0,
+      "workshop_type": "HEAT_TREAT",
+      "status": "ACTIVE",
+      "unavailability": [],
+      "availability_overrides": []
+    },
+    {
+      "worker_id": "DEMO_W_ASM",
+      "worker_name": "装配操作员",
+      "skill_level": "senior",
+      "skill_efficiency": 1.0,
+      "workshop_type": "ASSEMBLY",
+      "status": "ACTIVE",
+      "unavailability": [],
+      "availability_overrides": []
+    },
+    {
+      "worker_id": "DEMO_VIRTUAL_HEAT_WORKER",
+      "worker_name": "??????????",
+      "skill_level": "VIRTUAL",
+      "workshop_type": "HEAT_TREAT",
+      "virtual_resource": true,
+      "status": "ACTIVE",
+      "unavailability": [],
+      "availability_overrides": []
+    }
   ],
   "resource_group_profiles": [
-    {"resource_group_id": "DEMO_RG_MC", "resource_group_name": "演示机加工组", "resource_group_type": "MACHINING", "status": "ACTIVE", "machines": [{"machine_id": "DEMO_MC_01", "role": "primary"}], "workers": [{"worker_id": "DEMO_W_MC", "role": "primary"}], "toolings": [], "machine_worker_mapping": [{"machine_id": "DEMO_MC_01", "allowed_workers": ["DEMO_W_MC"], "max_parallel_workers": 1}]},
-    {"resource_group_id": "DEMO_RG_HEAT", "resource_group_name": "演示热处理组", "resource_group_type": "HEAT_TREAT", "status": "ACTIVE", "machines": [{"machine_id": "DEMO_FURNACE_01", "role": "primary"}], "workers": [{"worker_id": "DEMO_W_HEAT", "role": "primary"}], "toolings": [], "machine_worker_mapping": [{"machine_id": "DEMO_FURNACE_01", "allowed_workers": ["DEMO_W_HEAT"], "max_parallel_workers": 1}]},
-    {"resource_group_id": "DEMO_RG_ASM", "resource_group_name": "演示装配组", "resource_group_type": "ASSEMBLY", "status": "ACTIVE", "machines": [{"machine_id": "DEMO_ASM_01", "role": "primary"}], "workers": [{"worker_id": "DEMO_W_ASM", "role": "primary"}], "toolings": [], "machine_worker_mapping": [{"machine_id": "DEMO_ASM_01", "allowed_workers": ["DEMO_W_ASM"], "max_parallel_workers": 1}]}
+    {
+      "resource_group_id": "DEMO_RG_MC",
+      "resource_group_name": "演示机加工组",
+      "resource_group_type": "MACHINING",
+      "status": "ACTIVE",
+      "machines": [
+        {
+          "machine_id": "DEMO_MC_01",
+          "role": "primary"
+        }
+      ],
+      "workers": [
+        {
+          "worker_id": "DEMO_W_MC",
+          "role": "primary"
+        }
+      ],
+      "toolings": [],
+      "machine_worker_mapping": [
+        {
+          "machine_id": "DEMO_MC_01",
+          "allowed_workers": [
+            "DEMO_W_MC"
+          ],
+          "max_parallel_workers": 1
+        }
+      ]
+    },
+    {
+      "resource_group_id": "DEMO_RG_HEAT",
+      "resource_group_name": "演示热处理组",
+      "resource_group_type": "HEAT_TREAT",
+      "status": "ACTIVE",
+      "machines": [
+        {
+          "machine_id": "DEMO_FURNACE_01",
+          "role": "primary"
+        }
+      ],
+      "workers": [
+        {
+          "worker_id": "DEMO_W_HEAT",
+          "role": "primary"
+        }
+      ],
+      "toolings": [],
+      "machine_worker_mapping": [
+        {
+          "machine_id": "DEMO_FURNACE_01",
+          "allowed_workers": [
+            "DEMO_W_HEAT"
+          ],
+          "max_parallel_workers": 1
+        }
+      ]
+    },
+    {
+      "resource_group_id": "DEMO_RG_ASM",
+      "resource_group_name": "演示装配组",
+      "resource_group_type": "ASSEMBLY",
+      "status": "ACTIVE",
+      "machines": [
+        {
+          "machine_id": "DEMO_ASM_01",
+          "role": "primary"
+        }
+      ],
+      "workers": [
+        {
+          "worker_id": "DEMO_W_ASM",
+          "role": "primary"
+        }
+      ],
+      "toolings": [],
+      "machine_worker_mapping": [
+        {
+          "machine_id": "DEMO_ASM_01",
+          "allowed_workers": [
+            "DEMO_W_ASM"
+          ],
+          "max_parallel_workers": 1
+        }
+      ]
+    },
+    {
+      "resource_group_id": "DEMO_RG_VIRTUAL_HEAT",
+      "resource_group_name": "???????????",
+      "resource_group_type": "HEAT_TREAT",
+      "virtual_resource": true,
+      "status": "ACTIVE",
+      "machines": [
+        {
+          "machine_id": "DEMO_VIRTUAL_HEAT_MACHINE",
+          "role": "display"
+        }
+      ],
+      "workers": [
+        {
+          "worker_id": "DEMO_VIRTUAL_HEAT_WORKER",
+          "role": "display"
+        }
+      ],
+      "toolings": [],
+      "machine_worker_mapping": []
+    }
   ],
   "order_processes": [
-    {"order_id": "DEMO_MC_ORDER", "order_type": "NORMAL", "product_id": "P-MC", "product_name": "演示机加工件", "material_grade": "TC4", "quantity": 10, "priority": 5, "due_date": "2026-07-20", "release_date": "2026-07-13", "status": "RELEASED", "processes": [{"process_id": "DEMO_MC_P10", "process_name": "精加工", "sequence": 10, "status": "PENDING", "resource_group_id": "DEMO_RG_MC", "unit_duration_minutes": 30, "process_quantity": 10, "completed_quantity": 0, "remaining_quantity": 10, "material_ready": true, "material_ready_time": "2026-07-13T08:00:00", "previous_process_ids": [], "parallel_group": "", "max_parallel_splits": 0, "locks": {}}]},
-    {"order_id": "DEMO_HEAT_ORDER", "order_type": "NORMAL", "product_id": "P-HEAT", "product_name": "演示热处理件", "material": "TI", "material_grade": "TC4", "quantity": 10, "priority": 6, "due_date": "2026-07-21", "release_date": "2026-07-13", "status": "RELEASED", "processes": [{"process_id": "DEMO_HEAT_P10", "process_name": "真空热处理", "sequence": 10, "status": "PENDING", "resource_group_id": "DEMO_RG_HEAT", "unit_duration_minutes": 240, "process_quantity": 10, "completed_quantity": 0, "remaining_quantity": 10, "material_ready": true, "material_ready_time": "2026-07-13T08:00:00", "cooling_method": "N2_GAS_QUENCH", "previous_process_ids": [], "parallel_group": "", "max_parallel_splits": 0, "locks": {}, "override_batch_rules": {"allow_batch_merge": false}}]},
-    {"order_id": "DEMO_ASM_ORDER", "order_type": "NORMAL", "product_id": "P-ASM", "product_name": "演示装配件", "material_grade": "ASSEMBLY_KIT", "quantity": 5, "priority": 5, "due_date": "2026-07-22", "release_date": "2026-07-13", "status": "RELEASED", "processes": [{"process_id": "DEMO_ASM_P10", "process_name": "总装", "sequence": 10, "status": "PENDING", "resource_group_id": "DEMO_RG_ASM", "unit_duration_minutes": 60, "process_quantity": 5, "completed_quantity": 0, "remaining_quantity": 5, "material_ready": true, "material_ready_time": "2026-07-13T08:00:00", "previous_process_ids": [], "parallel_group": "", "max_parallel_splits": 0, "locks": {}}]}
+    {
+      "order_id": "DEMO_MC_ORDER",
+      "order_type": "NORMAL",
+      "product_id": "P-MC",
+      "product_name": "演示机加工件",
+      "material_grade": "TC4",
+      "quantity": 10,
+      "priority": 5,
+      "due_date": "2026-07-20",
+      "release_date": "2026-07-13",
+      "status": "RELEASED",
+      "processes": [
+        {
+          "process_id": "DEMO_MC_P10",
+          "process_name": "精加工",
+          "sequence": 10,
+          "status": "PENDING",
+          "resource_group_id": "DEMO_RG_MC",
+          "unit_duration_minutes": 30,
+          "process_quantity": 10,
+          "material_ready_time": "2026-07-13T08:00:00",
+          "previous_process_ids": [],
+          "parallel_group": "",
+          "max_parallel_splits": 0,
+          "locks": {}
+        },
+        {
+          "process_id": "DEMO_MC_P20",
+          "process_name": "?????",
+          "sequence": 20,
+          "status": "PENDING",
+          "resource_group_id": "DEMO_RG_VIRTUAL_HEAT",
+          "unit_duration_minutes": 480,
+          "process_quantity": 10,
+          "material_ready_time": "",
+          "previous_process_ids": [
+            "DEMO_MC_P10"
+          ],
+          "parallel_group": "",
+          "max_parallel_splits": 0,
+          "locks": {},
+          "override_batch_rules": {
+            "allow_batch_merge": false
+          }
+        }
+      ],
+      "order_business_type": "MACHINING"
+    },
+    {
+      "order_id": "DEMO_HEAT_ORDER",
+      "order_type": "NORMAL",
+      "product_id": "P-HEAT",
+      "product_name": "演示热处理件",
+      "material": "TI",
+      "material_grade": "TC4",
+      "quantity": 10,
+      "priority": 6,
+      "due_date": "2026-07-21",
+      "release_date": "2026-07-13",
+      "status": "RELEASED",
+      "processes": [
+        {
+          "process_id": "DEMO_HEAT_P10",
+          "process_name": "真空热处理",
+          "sequence": 10,
+          "status": "PENDING",
+          "resource_group_id": "DEMO_RG_HEAT",
+          "unit_duration_minutes": 240,
+          "process_quantity": 10,
+          "material_ready_time": "2026-07-13T08:00:00",
+          "cooling_method": "N2_GAS_QUENCH",
+          "previous_process_ids": [],
+          "parallel_group": "",
+          "max_parallel_splits": 0,
+          "locks": {},
+          "override_batch_rules": {
+            "allow_batch_merge": false
+          }
+        }
+      ],
+      "order_business_type": "HEAT_TREAT"
+    },
+    {
+      "order_id": "DEMO_ASM_ORDER",
+      "order_type": "NORMAL",
+      "product_id": "P-ASM",
+      "product_name": "演示装配件",
+      "material_grade": "ASSEMBLY_KIT",
+      "quantity": 5,
+      "priority": 5,
+      "due_date": "2026-07-22",
+      "release_date": "2026-07-13",
+      "status": "RELEASED",
+      "processes": [
+        {
+          "process_id": "DEMO_ASM_P10",
+          "process_name": "总装",
+          "sequence": 10,
+          "status": "PENDING",
+          "resource_group_id": "DEMO_RG_ASM",
+          "unit_duration_minutes": 60,
+          "process_quantity": 5,
+          "material_ready_time": "2026-07-13T08:00:00",
+          "previous_process_ids": [],
+          "parallel_group": "",
+          "max_parallel_splits": 0,
+          "locks": {}
+        }
+      ],
+      "order_business_type": "ASSEMBLY"
+    }
   ]
 }

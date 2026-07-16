@@ -1,4 +1,4 @@
-/* APS unified premium visual layer */
+/* APS 统一高级视觉层 */
 :root {
   --ink: #14231d;
   --muted: #687970;
@@ -51,7 +51,7 @@ body {
   background: #a1b9ae;
 }
 
-/* Primary application frame */
+/* 主应用框架 */
 .app-shell {
   min-height: 100vh;
   background: transparent;
@@ -188,7 +188,7 @@ nav button.active::before {
   padding: 32px 36px 64px;
 }
 
-/* Buttons and controls */
+/* 按钮与控件 */
 .button {
   min-height: 40px;
   padding: 10px 17px;
@@ -266,7 +266,46 @@ textarea,
   outline: 0;
 }
 
-/* Surfaces and cards */
+/* 页面层次与卡片 */
+
+.system-config-panel {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.system-config-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(100, 116, 139, .18);
+  border-radius: 14px;
+  background: rgba(248, 250, 252, .82);
+}
+
+.system-config-meta span,
+.config-confirmations span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.config-confirmations {
+  display: flex;
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.badge.VIRTUAL {
+  margin-right: 6px;
+  color: #7c3aed;
+  border-color: rgba(124, 58, 237, .24);
+  background: rgba(237, 233, 254, .82);
+}
+
+@media (max-width: 900px) {
+  .system-config-meta { grid-template-columns: 1fr; }
+}
 .grid {
   gap: 20px;
 }
@@ -348,7 +387,7 @@ textarea,
   font-size: 14px;
 }
 
-/* Tables and data density */
+/* 表格与数据密度 */
 .table-wrap {
   border-radius: 11px;
 }
@@ -485,7 +524,7 @@ textarea,
   background: #fafcfb;
 }
 
-/* Search and filtering */
+/* 搜索与筛选 */
 .version-search-toolbar {
   gap: 10px;
   margin-bottom: 20px;
@@ -499,7 +538,7 @@ textarea,
   font-size: 12px;
 }
 
-/* Tabs, master data and effective schedule */
+/* 页签、主数据与生效计划 */
 .tabs {
   gap: 9px;
 }
@@ -613,7 +652,7 @@ textarea,
   font-size: 12px;
 }
 
-/* Modals and forms */
+/* 弹窗与表单 */
 .modal-backdrop {
   background: rgba(7, 27, 20, .64);
   backdrop-filter: blur(7px);

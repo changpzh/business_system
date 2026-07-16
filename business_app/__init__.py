@@ -1,3 +1,3 @@
-"""APS business system package."""
+"""APS 业务系统软件包。"""
 
 __version__ = "1.0.0"

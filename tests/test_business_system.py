@@ -16,12 +16,13 @@ os.environ["SESSION_SECRET"] = "test-secret"
 from fastapi.testclient import TestClient
 
 from business_app.algorithm_client import algorithm_client
-from business_app.database import db, now_text
+from business_app.database import db, initialize_database, now_text
 from business_app.main import app
 from business_app.services import (
     _detect_schedule_conflicts,
     _restore_batch_metadata_from_history,
     _sync_batch_metadata,
+    build_effective_schedule,
     compare_versions,
     ga_parameters_for_process_count,
     is_manually_locked,
@@ -101,7 +102,7 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(dashboard.status_code, 200)
         self.assertEqual(dashboard.json()["master_counts"]["order"], 3)
         snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
-        self.assertEqual(len(snapshot["machine_profiles"]), 3)
+        self.assertEqual(len(snapshot["machine_profiles"]), 4)
         self.assertEqual(
             {item["schedule_type"] for item in snapshot["machine_calendars"]},
             {"machining", "heat_treatment", "assembly"},
@@ -114,8 +115,50 @@ class BusinessSystemTests(unittest.TestCase):
         validation = self.client.get("/api/master-data/validate", headers=self.headers).json()
         self.assertTrue(validation["valid"], validation["errors"])
 
+    def test_restart_initialization_preserves_existing_business_data(self) -> None:
+        """服务重启只能补建表和恢复任务状态，不能清除已有业务数据。"""
+        entity_id = "RESTART_PRESERVE_SENTINEL"
+        stamp = now_text()
+        with db() as connection:
+            connection.execute(
+                """INSERT INTO master_records(
+                       entity_type,entity_id,payload_json,revision,updated_by,updated_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    "machine",
+                    entity_id,
+                    json.dumps(
+                        {
+                            "machine_id": entity_id,
+                            "machine_name": "重启数据保留测试设备",
+                            "machine_type": "TEST",
+                            "workshop_type": "MACHINING",
+                            "status": "ACTIVE",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    1,
+                    "test",
+                    stamp,
+                ),
+            )
+        try:
+            initialize_database()
+            with db() as connection:
+                preserved = connection.execute(
+                    "SELECT COUNT(*) AS count FROM master_records WHERE entity_type='machine' AND entity_id=?",
+                    (entity_id,),
+                ).fetchone()["count"]
+            self.assertEqual(preserved, 1)
+        finally:
+            with db() as connection:
+                connection.execute(
+                    "DELETE FROM master_records WHERE entity_type='machine' AND entity_id=?",
+                    (entity_id,),
+                )
+
     def test_task_defaults_use_next_working_day_day_shift(self) -> None:
-        response = self.client.get("/api/tasks/defaults", headers=self.headers)
+        response = self.client.get("/api/tasks/defaults?schedule_type=machining", headers=self.headers)
         self.assertEqual(response.status_code, 200)
         schedule_start = datetime.fromisoformat(response.json()["schedule_start"])
         self.assertGreater(schedule_start.date(), datetime.now().date())
@@ -165,6 +208,19 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(select_calendar(connection, "assembly")["calendar_id"], "CAL_assembly")
         connection.close()
 
+    def test_calendar_selection_does_not_guess_legacy_calendar_type(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE master_records(entity_type TEXT,entity_id TEXT,payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO master_records VALUES('calendar','LEGACY',?)",
+            (json.dumps({"calendar_id": "LEGACY", "calendar_name": "热表日历", "weekly_shifts": {}}),),
+        )
+        self.assertEqual(select_calendar(connection, "heat_treatment"), {})
+        connection.close()
+
     def test_enabled_cooling_constraint_requires_method_in_business_snapshot(self) -> None:
         snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
         order = next(item for item in snapshot["order_processes"] if item.get("order_id") == "DEMO_HEAT_ORDER")
@@ -183,6 +239,43 @@ class BusinessSystemTests(unittest.TestCase):
         }
         order["material_grade"] = "   "
         self.assertTrue(any("允许合批但缺少 material_grade" in item for item in validate_snapshot(snapshot)))
+
+    def test_route_cycle_and_external_plan_source_are_rejected(self) -> None:
+        snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
+        machining_order = next(
+            item for item in snapshot["order_processes"] if item.get("order_id") == "DEMO_MC_ORDER"
+        )
+        first, second = machining_order["processes"][:2]
+        first["previous_process_ids"] = [second["process_id"]]
+        second["previous_process_ids"] = [first["process_id"]]
+        errors = validate_snapshot(snapshot)
+        self.assertTrue(any("循环前置关系" in item for item in errors), errors)
+
+        first["previous_process_ids"] = []
+        second["external_plan"] = {
+            "status": "CONFIRMED",
+            "source_business_type": "SURFACE_TREAT",
+            "reference_id": "OUTSIDE-001",
+            "plan_start_time": "2026-07-20T08:00:00",
+            "plan_end_time": "2026-07-20T12:00:00",
+            "confirmed_by": "外部计划员",
+            "confirmed_at": "2026-07-16T10:00:00",
+        }
+        errors = validate_snapshot(snapshot)
+        self.assertTrue(any("必须与资源组类型 HEAT_TREAT 一致" in item for item in errors), errors)
+
+    def test_effective_schedule_uses_order_scope_for_cross_business_processes(self) -> None:
+        with db() as connection:
+            result = build_effective_schedule(
+                connection,
+                schedule_type="machining",
+                order_id="DEMO_MC_ORDER",
+            )
+        processes = {item["process_id"]: item for item in result["processes"]}
+        self.assertIn("DEMO_MC_P20", processes)
+        self.assertEqual(processes["DEMO_MC_P20"]["schedule_type"], "machining")
+        self.assertEqual(processes["DEMO_MC_P20"]["resource_group_type"], "HEAT_TREAT")
+        self.assertTrue(processes["DEMO_MC_P20"]["virtual_resource"])
 
     def test_ga_parameters_follow_process_scale_boundaries(self) -> None:
         expectations = {
@@ -292,6 +385,22 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertIn("function switchOrderType", app_js)
         self.assertIn("data-order-type", app_js)
         self.assertIn(".order-type-tabs", styles)
+
+    def test_business_unit_configuration_and_virtual_frontend_rules_are_wired(self) -> None:
+        static_dir = Path(__file__).parents[1] / "business_app" / "static"
+        app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+        index = (static_dir / "index.html").read_text(encoding="utf-8")
+        premium = (static_dir / "premium.css").read_text(encoding="utf-8")
+        self.assertIn('data-page="settings"', index)
+        self.assertIn('id="systemBrandTitle"', index)
+        self.assertIn("state.systemConfig=await api('/api/system-configuration')", app_js)
+        self.assertIn("function renderSystemConfiguration", app_js)
+        self.assertIn("deploymentScheduleTypes", app_js)
+        self.assertIn("order_business_type", app_js)
+        self.assertIn("const resourceFields=item.virtual_resource?'':", app_js)
+        self.assertIn("if(!item.virtual_resource){const machine=", app_js)
+        self.assertIn(".system-config-panel", premium)
+        self.assertIn(".badge.VIRTUAL", premium)
 
     def test_calendar_master_data_has_three_scoped_calendar_tabs(self) -> None:
         app_js = (Path(__file__).parents[1] / "business_app" / "static" / "app.js").read_text(
@@ -758,9 +867,11 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(detail["result"]["schedule"][0]["status"], "PENDING")
 
     def test_z_single_operation_adjustment_preview_and_execute(self) -> None:
+        future_start = (datetime.now() + timedelta(days=3)).replace(hour=8, minute=0, second=0, microsecond=0)
+        future_end = future_start + timedelta(hours=6)
         preview_payload = {
-            "plan_start_time": "2026-07-16T08:00:00",
-            "plan_end_time": "2026-07-16T14:00:00",
+            "plan_start_time": future_start.isoformat(timespec="seconds"),
+            "plan_end_time": future_end.isoformat(timespec="seconds"),
             "assigned_machine_id": "DEMO_MC_01",
             "assigned_worker_id": "DEMO_W_MC",
         }
@@ -777,7 +888,11 @@ class BusinessSystemTests(unittest.TestCase):
 
         past_preview = self.client.post(
             "/api/processes/DEMO_MC_P10/adjustments/preview",
-            json={**preview_payload, "plan_start_time": "2026-07-13T08:00:00", "plan_end_time": "2026-07-13T14:00:00"},
+            json={
+                **preview_payload,
+                "plan_start_time": (datetime.now() - timedelta(days=3)).replace(hour=8, minute=0).isoformat(timespec="seconds"),
+                "plan_end_time": (datetime.now() - timedelta(days=3)).replace(hour=14, minute=0).isoformat(timespec="seconds"),
+            },
             headers=self.headers,
         )
         self.assertEqual(past_preview.status_code, 200, past_preview.text)
@@ -833,9 +948,68 @@ class BusinessSystemTests(unittest.TestCase):
             headers=self.headers,
         ).json()
         adjusted = effective["schedule"][0]
-        self.assertEqual(adjusted["plan_start_time"], "2026-07-16T08:00:00")
-        self.assertEqual(adjusted["plan_end_time"], "2026-07-16T14:00:00")
+        self.assertEqual(adjusted["plan_start_time"], future_start.isoformat(timespec="seconds"))
+        self.assertEqual(adjusted["plan_end_time"], future_end.isoformat(timespec="seconds"))
         self.assertEqual(adjusted["schedule_version_id"], result["version_id"])
+
+    def test_zz_deployment_configuration_limits_orders_and_task_type(self) -> None:
+        current = self.client.get("/api/system-configuration", headers=self.headers)
+        self.assertEqual(current.status_code, 200)
+        self.assertEqual(current.json()["deployment_process_type"], "DEBUG")
+
+        changed = self.client.put(
+            "/api/system-configuration",
+            json={
+                "deployment_process_type": "MACHINING",
+                "system_display_name": "机加智能排程",
+                "deployment_locked": False,
+                "change_reason": "自动化测试切换机加单元",
+                "confirm_published_versions": True,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+        orders = self.client.get("/api/master-data/order", headers=self.headers).json()
+        self.assertEqual({row["payload"]["order_business_type"] for row in orders}, {"MACHINING"})
+        defaults = self.client.get(
+            "/api/tasks/defaults?schedule_type=heat_treatment", headers=self.headers
+        )
+        self.assertEqual(defaults.status_code, 200, defaults.text)
+        self.assertEqual(defaults.json()["schedule_type"], "machining")
+
+        restored = self.client.put(
+            "/api/system-configuration",
+            json={
+                "deployment_process_type": "DEBUG",
+                "system_display_name": "调试智能排程",
+                "deployment_locked": False,
+                "change_reason": "自动化测试恢复调试单元",
+                "confirm_published_versions": True,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(restored.status_code, 200, restored.text)
+
+    def test_virtual_resources_are_excluded_from_conflict_detection(self) -> None:
+        rows = [
+            {
+                "process_id": "V1",
+                "machine_id": "VIRTUAL_MACHINE",
+                "worker_id": "VIRTUAL_WORKER",
+                "plan_start_time": "2026-07-20T08:00:00",
+                "plan_end_time": "2026-07-20T12:00:00",
+                "virtual_resource": True,
+            },
+            {
+                "process_id": "V2",
+                "machine_id": "VIRTUAL_MACHINE",
+                "worker_id": "VIRTUAL_WORKER",
+                "plan_start_time": "2026-07-20T09:00:00",
+                "plan_end_time": "2026-07-20T11:00:00",
+                "virtual_resource": True,
+            },
+        ]
+        self.assertEqual(_detect_schedule_conflicts(rows), [])
 
 
 if __name__ == "__main__":

@@ -13,7 +13,13 @@ class AlgorithmClientError(RuntimeError):
 
 
 class AlgorithmClient:
-    def _json_request(self, path: str, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _json_request(
+        path: str,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
         request = Request(
             f"{settings.algorithm_base_url}{path}",
