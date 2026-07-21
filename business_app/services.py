@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
@@ -8,9 +9,11 @@ from typing import Any
 from uuid import uuid4
 
 from .algorithm_client import AlgorithmClientError, algorithm_client
+from .calendar_rules import available_minutes_for_profile, calendar_day_shifts
 from .config import settings
 from .constants import (
     ADJUSTMENT_CODE_BASE_CHANGEOVER,
+    ADJUSTMENT_CODE_CRITICAL_PATH_OVERRIDE,
     ADJUSTMENT_CODE_DOWNSTREAM_LOCK_CONFLICT,
     ADJUSTMENT_CODE_DUE_DATE_DELAY,
     ADJUSTMENT_CODE_DURATION_VALID,
@@ -43,6 +46,8 @@ from .constants import (
     CONSTRAINT_CODE_RESOURCE_CALENDAR,
     CONSTRAINT_CODE_RESOURCE_CALENDAR_NO_WINDOW,
     CONSTRAINT_CODE_TIME_RANGE_INVALID,
+    CRITICAL_PATH_PROCESS_FIELDS,
+    LEGACY_CRITICAL_PATH_PROCESS_FIELDS,
     DISPATCH_RULE_DELIVERY,
     ORDER_BUSINESS_TYPES,
     PROCESS_MANUAL_ADJUSTMENT_BLOCKED_STATUSES,
@@ -89,6 +94,9 @@ from .domain import (
     schedule_type_for_order_business_type,
 )
 from .system_configuration import get_system_configuration
+from .resource_calendar_validation import validate_resource_calendar_fields
+from .temperature_validation import machine_temperature_range, process_temperature_range
+from .worker_skills import required_skill_set, worker_skill_set
 
 
 ENTITY_CONFIG = {
@@ -460,16 +468,6 @@ def _intervals_overlap(left_start: datetime, left_end: datetime, right_start: da
     return left_start < right_end and right_start < left_end
 
 
-def _calendar_day_shifts(calendar: dict[str, Any], target_day: date) -> list[dict[str, Any]]:
-    """返回指定日期的配置班次，并优先应用特殊日期覆盖规则。"""
-    special = (calendar.get("special_shifts") or {}).get(target_day.isoformat())
-    if special is not None:
-        shifts = special if isinstance(special, list) else special.get("shifts", [special])
-    else:
-        shifts = (calendar.get("weekly_shifts") or {}).get(str((target_day.weekday() + 1) % 7), [])
-    return [shift for shift in shifts or [] if isinstance(shift, dict)]
-
-
 def next_working_day_shift_start(
     calendar: dict[str, Any],
     current_time: datetime | None = None,
@@ -479,13 +477,7 @@ def next_working_day_shift_start(
     now = current_time or datetime.now()
     target_day = now.date() + timedelta(days=1)
     for _ in range(max(horizon_days, 1)):
-        shifts = _calendar_day_shifts(calendar, target_day)
-        preferred_start = calendar.get("day_shift_start")
-        if shifts and preferred_start:
-            return datetime.combine(
-                target_day,
-                datetime.strptime(str(preferred_start), "%H:%M").time(),
-            )
+        shifts = calendar_day_shifts(calendar, target_day)
         day_shifts = [
             shift
             for shift in shifts
@@ -493,6 +485,26 @@ def next_working_day_shift_start(
             or "day" in str(shift.get("name") or "").lower()
         ]
         candidates = day_shifts or shifts
+        preferred_start = calendar.get("day_shift_start")
+        if candidates and preferred_start:
+            preferred_datetime = datetime.combine(
+                target_day,
+                datetime.strptime(str(preferred_start), "%H:%M").time(),
+            )
+            for shift in candidates:
+                for segment in shift.get("segments", []) or []:
+                    segment_start = datetime.combine(
+                        target_day,
+                        datetime.strptime(str(segment["start"]), "%H:%M").time(),
+                    )
+                    segment_end = datetime.combine(
+                        target_day,
+                        datetime.strptime(str(segment["end"]), "%H:%M").time(),
+                    )
+                    if segment_end <= segment_start:
+                        segment_end += timedelta(days=1)
+                    if segment_start <= preferred_datetime < segment_end:
+                        return preferred_datetime
         starts = [
             datetime.combine(target_day, datetime.strptime(str(segment["start"]), "%H:%M").time())
             for shift in candidates
@@ -608,6 +620,24 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
     hard_errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     checks: list[dict[str, Any]] = []
+    critical_types = [
+        critical_type
+        for critical_type, field in (
+            ("delivery", "delivery_critical"),
+            ("resource", "resource_critical"),
+        )
+        if current.get(field)
+    ]
+    critical_override_required = bool(critical_types)
+    if critical_override_required:
+        warnings.append(
+            _adjustment_issue(
+                ADJUSTMENT_CODE_CRITICAL_PATH_OVERRIDE,
+                "关键路径保护",
+                "当前工序属于交付关键或资源关键路径，执行局部微调前必须明确授权覆盖关键路径保护",
+                "warning",
+            )
+        )
     constraint_result = _process_constraint_result(
         snapshot,
         str(current.get("schedule_type") or _schedule_type_for_group(group)),
@@ -990,6 +1020,18 @@ def preview_process_adjustment(process_id: str, payload: dict[str, Any]) -> dict
         "process_name": current.get("process_name") or process.get("process_name") or "",
         "schedule_type": current.get("schedule_type") or SCHEDULE_TYPE_MACHINING,
         "virtual_resource": virtual_resource,
+        "critical_override_required": critical_override_required,
+        "critical_types": critical_types,
+        "structural_critical": bool(current.get("structural_critical")),
+        "delivery_critical": bool(current.get("delivery_critical")),
+        "delivery_critical_level": current.get("delivery_critical_level"),
+        "delivery_path_ids": current.get("delivery_path_ids") or [],
+        "delivery_total_slack_minutes": current.get("delivery_total_slack_minutes"),
+        "resource_critical": bool(current.get("resource_critical")),
+        "resource_critical_reasons": current.get("resource_critical_reasons") or [],
+        "resource_path_ids": current.get("resource_path_ids") or [],
+        "resource_total_slack_minutes": current.get("resource_total_slack_minutes"),
+        "resource_delivery_slack_minutes": current.get("resource_delivery_slack_minutes"),
         "operation": operation,
         "can_execute": not hard_errors,
         "requires_confirmation": bool(warnings or hard_errors or machine_changed or worker_changed or delta_minutes),
@@ -1039,6 +1081,8 @@ def execute_process_adjustment(process_id: str, payload: dict[str, Any], actor: 
         raise ValueError(messages or "单工序调整未通过校验")
     if preview["warnings"] and not payload.get("confirm_warnings"):
         raise ValueError("存在可覆盖警告，请确认影响范围后再执行")
+    if preview.get("critical_override_required") and not payload.get("critical_override_authorized"):
+        raise ValueError("关键路径工序局部微调必须明确授权覆盖关键路径保护")
 
     strategy = str(payload.get("strategy") or preview["recommended_strategy"])
     if strategy not in ADJUSTMENT_STRATEGIES:
@@ -1260,12 +1304,14 @@ def build_effective_schedule(
     current_version_ids = {str(row["version_id"]) for row in published_versions}
 
     algorithm_processes: dict[tuple[str, str], dict[str, Any]] = {}
+    critical_path_by_version: dict[str, dict[str, Any]] = {}
     for version in version_rows:
         version_id = str(version["version_id"])
         try:
             result = json.loads(version["result_json"])
         except (TypeError, json.JSONDecodeError):
             result = {}
+        critical_path_by_version[version_id] = result.get("critical_path_analysis") or {}
         for process in result.get("schedule", []):
             if process.get("process_id"):
                 algorithm_processes[(version_id, str(process["process_id"]))] = process
@@ -1391,6 +1437,11 @@ def build_effective_schedule(
                         ],
                     },
                     "source_process_status": algorithm.get("source_status") or "",
+                    **{
+                        field: algorithm.get(field, process.get(field))
+                        for field in CRITICAL_PATH_PROCESS_FIELDS
+                        if field in algorithm or field in process
+                    },
                     "has_conflict": False,
                     "conflict_types": [],
                 }
@@ -1465,6 +1516,39 @@ def build_effective_schedule(
     for version in published_versions:
         item = {key: version[key] for key in version if key != "result_json"}
         version_payload.append(item)
+    visible_critical_paths: list[dict[str, Any]] = []
+    visible_critical_versions = {
+        str(row.get("schedule_version_id") or "")
+        for row in visible_effective
+        if row.get("schedule_version_id")
+    }
+    analyzed_critical_versions = {
+        version_id
+        for version_id in visible_critical_versions
+        if (critical_path_by_version.get(version_id) or {}).get("enabled")
+    }
+    visible_effective_ids = {str(row.get("process_id") or "") for row in visible_effective}
+    for version_id in sorted(analyzed_critical_versions):
+        analysis = critical_path_by_version.get(version_id) or {}
+        for path in analysis.get("all_paths", []) or []:
+            process_ids = [str(item) for item in path.get("process_ids", []) or []]
+            if any(item in visible_effective_ids for item in process_ids):
+                visible_critical_paths.append({**path, "schedule_version_id": version_id})
+    visible_critical_paths.sort(
+        key=lambda item: (
+            str(item.get("schedule_version_id") or ""),
+            str(item.get("critical_type") or ""),
+            int(item.get("rank") or 0),
+        )
+    )
+    paths_by_type = {
+        critical_type: [
+            path
+            for path in visible_critical_paths
+            if path.get("critical_type") == critical_type
+        ]
+        for critical_type in ("structural", "delivery", "resource")
+    }
     return {
         "generated_at": now_text(),
         "published_versions": version_payload,
@@ -1498,6 +1582,43 @@ def build_effective_schedule(
         "processes": filtered_rows,
         "unscheduled_processes": visible_unscheduled,
         "conflicts": visible_conflicts,
+        "critical_path_analysis": {
+            "enabled": bool(analyzed_critical_versions),
+            "all_paths": visible_critical_paths,
+            "structural": {
+                "enabled": bool(analyzed_critical_versions),
+                "paths": paths_by_type["structural"],
+                "representative_path_count": len(paths_by_type["structural"]),
+                "critical_process_count": sum(
+                    bool(row.get("structural_critical")) for row in visible_effective
+                ),
+            },
+            "delivery": {
+                "enabled": bool(analyzed_critical_versions),
+                "paths": paths_by_type["delivery"],
+                "representative_path_count": len(paths_by_type["delivery"]),
+                "critical_process_count": sum(
+                    bool(row.get("delivery_critical")) for row in visible_effective
+                ),
+                "overdue_process_count": sum(
+                    row.get("delivery_critical_level") == "OVERDUE"
+                    for row in visible_effective
+                ),
+            },
+            "resource": {
+                "enabled": bool(analyzed_critical_versions),
+                "paths": paths_by_type["resource"],
+                "representative_path_count": len(paths_by_type["resource"]),
+                "critical_process_count": sum(
+                    bool(row.get("resource_critical")) for row in visible_effective
+                ),
+            },
+            "negative_delivery_slack_process_count": sum(
+                float(row.get("delivery_total_slack_minutes") or 0) < 0
+                for row in visible_effective
+                if row.get("delivery_total_slack_minutes") is not None
+            ),
+        },
         "filter_options": {
             "schedule_types": sorted({row["schedule_type"] for row in rows if row["schedule_type"]}),
             "statuses": sorted({str(row["status"]) for row in rows if row["status"]}),
@@ -1506,6 +1627,31 @@ def build_effective_schedule(
             "workers": sorted({row["worker_id"] for row in rows if row["worker_id"]}),
         },
     }
+
+
+def validate_resource_group_preference_fields(group: dict[str, Any]) -> list[str]:
+    """校验资源组设备/人员引用中的主备角色和数字优先级。"""
+    errors: list[str] = []
+    group_id = str(group.get("resource_group_id") or "")
+    group_virtual = is_virtual_resource(group)
+    for key, id_field, label in (("machines", "machine_id", "设备"), ("workers", "worker_id", "人员")):
+        references = group.get(key, [])
+        if not isinstance(references, list):
+            errors.append(f"资源组 {group_id} 的 {key} 必须是数组")
+            continue
+        for index, item in enumerate(references):
+            if not isinstance(item, dict) or not item.get(id_field):
+                errors.append(f"资源组 {group_id} 的第 {index + 1} 个{label}引用缺少 {id_field}")
+                continue
+            role = str(item.get("role") or "primary").strip().lower()
+            valid_roles = {"primary", "backup", "display"} if group_virtual else {"primary", "backup"}
+            if role not in valid_roles:
+                errors.append(f"资源组 {group_id} 的{label} {item.get(id_field)} role 非法: {item.get('role')}")
+            if "priority" in item:
+                priority = item.get("priority")
+                if isinstance(priority, bool) or not isinstance(priority, (int, float)) or not math.isfinite(float(priority)):
+                    errors.append(f"资源组 {group_id} 的{label} {item.get(id_field)} priority 必须是有限数字")
+    return errors
 
 
 def validate_snapshot(snapshot: dict[str, Any]) -> list[str]:
@@ -1525,19 +1671,44 @@ def validate_snapshot(snapshot: dict[str, Any]) -> list[str]:
     groups = {str(item.get("resource_group_id")): item for item in snapshot.get("resource_group_profiles", [])}
     for label, records in (("设备", machines), ("人员", workers)):
         for record_id, record in records.items():
+            errors.extend(
+                validate_resource_calendar_fields(
+                    record,
+                    f"{label} {record_id}",
+                )
+            )
             if "virtual_resource" in record and not isinstance(record.get("virtual_resource"), bool):
                 errors.append(f"{label} {record_id} 的 virtual_resource 必须是布尔值")
+            if label == "设备":
+                try:
+                    machine_temperature_range(record, f"设备 {record_id}")
+                except ValueError as exc:
+                    errors.append(str(exc))
+            else:
+                try:
+                    worker_skill_set(record, f"人员 {record_id}")
+                except ValueError as exc:
+                    errors.append(str(exc))
+                if "workshop_type" in record and record.get("workshop_type") is not None and not isinstance(
+                    record.get("workshop_type"), str
+                ):
+                    errors.append(f"人员 {record_id}.workshop_type 必须是字符串或不填写")
     for group_id, group in groups.items():
         if "virtual_resource" in group and not isinstance(group.get("virtual_resource"), bool):
             errors.append(f"资源组 {group_id} 的 virtual_resource 必须是布尔值")
         group_virtual = is_virtual_resource(group)
-        for item in group.get("machines", []):
+        errors.extend(validate_resource_group_preference_fields(group))
+        for item in group.get("machines", []) if isinstance(group.get("machines", []), list) else []:
+            if not isinstance(item, dict) or not item.get("machine_id"):
+                continue
             machine_id = str(item.get("machine_id"))
             if machine_id not in machines:
                 errors.append(f"资源组 {group_id} 引用了不存在的设备 {item.get('machine_id')}")
             elif is_virtual_resource(machines[machine_id]) != group_virtual:
                 errors.append(f"资源组 {group_id} 与设备 {machine_id} 的 virtual_resource 必须一致")
-        for item in group.get("workers", []):
+        for item in group.get("workers", []) if isinstance(group.get("workers", []), list) else []:
+            if not isinstance(item, dict) or not item.get("worker_id"):
+                continue
             worker_id = str(item.get("worker_id"))
             if worker_id not in workers:
                 errors.append(f"资源组 {group_id} 引用了不存在的人员 {item.get('worker_id')}")
@@ -1581,6 +1752,16 @@ def validate_snapshot(snapshot: dict[str, Any]) -> list[str]:
                     errors.append(f"工序 {process_id} 的 process_quantity 必须大于 0")
             except (TypeError, ValueError):
                 errors.append(f"工序 {process_id} 的工时或数量格式无效")
+            required_temperature: tuple[float, float] | None = None
+            try:
+                required_temperature = process_temperature_range(process, f"工序 {process_id}")
+            except ValueError as exc:
+                errors.append(str(exc))
+            required_skills: set[str] = set()
+            try:
+                required_skills = required_skill_set(process, f"工序 {process_id}")
+            except ValueError as exc:
+                errors.append(str(exc))
             group_id = str(process.get("resource_group_id", ""))
             group = groups.get(group_id)
             if not group:
@@ -1599,6 +1780,55 @@ def validate_snapshot(snapshot: dict[str, Any]) -> list[str]:
                 if is_virtual_resource(group):
                     if bool((process.get("override_batch_rules", {}) or {}).get("allow_batch_merge")):
                         errors.append(f"虚拟工序 {process_id} 不允许合炉或合槽")
+                elif required_temperature is not None:
+                    candidate_machine_ids = [
+                        str(item.get("machine_id"))
+                        for item in group.get("machines", [])
+                        if isinstance(item, dict) and item.get("machine_id")
+                    ]
+                    compatible_machine_ids: list[str] = []
+                    for machine_id in candidate_machine_ids:
+                        machine = machines.get(machine_id)
+                        if not machine:
+                            continue
+                        try:
+                            capability = machine_temperature_range(machine, f"设备 {machine_id}")
+                        except ValueError:
+                            continue
+                        if (
+                            capability is not None
+                            and capability[0] <= required_temperature[0]
+                            and capability[1] >= required_temperature[1]
+                        ):
+                            compatible_machine_ids.append(machine_id)
+                    if not compatible_machine_ids:
+                        errors.append(
+                            f"工序 {process_id} 的温度要求 "
+                            f"[{required_temperature[0]:g}, {required_temperature[1]:g}] "
+                            f"在资源组 {group_id} 中没有温度能力完整覆盖的设备"
+                        )
+                if not is_virtual_resource(group) and required_skills:
+                    candidate_worker_ids = [
+                        str(item.get("worker_id"))
+                        for item in group.get("workers", [])
+                        if isinstance(item, dict) and item.get("worker_id")
+                    ]
+                    compatible_worker_ids: list[str] = []
+                    for worker_id in candidate_worker_ids:
+                        worker = workers.get(worker_id)
+                        if not worker:
+                            continue
+                        try:
+                            skills = worker_skill_set(worker, f"人员 {worker_id}")
+                        except ValueError:
+                            continue
+                        if required_skills.issubset(skills):
+                            compatible_worker_ids.append(worker_id)
+                    if not compatible_worker_ids:
+                        errors.append(
+                            f"工序 {process_id} 要求技能 {sorted(required_skills)}，"
+                            f"资源组 {group_id} 中没有具备全部技能的人员"
+                        )
             cooling_enabled = process.get("cooling_constraint_enabled", False)
             if not isinstance(cooling_enabled, bool):
                 errors.append(f"工序 {process_id} 的 cooling_constraint_enabled 必须是布尔值")
@@ -2018,6 +2248,13 @@ def publish_version(version_id: str, actor: str) -> int:
                     if scheduled_status in PROCESS_PUBLISHED_STATUSES
                     else PROCESS_STATUS_CONFIRMED
                 )
+                for field in CRITICAL_PATH_PROCESS_FIELDS:
+                    if field in scheduled:
+                        process[field] = deepcopy(scheduled[field])
+                    else:
+                        process.pop(field, None)
+                for field in LEGACY_CRITICAL_PATH_PROCESS_FIELDS:
+                    process.pop(field, None)
                 _sync_batch_metadata(process, scheduled)
                 process["locks"] = process.get("locks") or {}
                 changed = True
@@ -2122,6 +2359,80 @@ def task_run_summary(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_machine_load_context(
+    snapshot: dict[str, Any],
+    result: dict[str, Any],
+    schedule_start: Any,
+) -> dict[str, Any]:
+    """构建设备负荷图的统一周期及各设备日历可用工时。"""
+    schedule = [
+        item
+        for item in result.get("schedule", []) or []
+        if item.get("machine_id") and not item.get("virtual_resource")
+    ]
+    start = _load_period_datetime(schedule_start)
+    if start is None:
+        start_candidates = [
+            value
+            for value in (_load_period_datetime(item.get("plan_start_time")) for item in schedule)
+            if value is not None
+        ]
+        start = min(start_candidates) if start_candidates else None
+    end_candidates = [
+        value
+        for value in (_load_period_datetime(item.get("plan_end_time")) for item in schedule)
+        if value is not None
+    ]
+    end = max(end_candidates) if end_candidates else None
+
+    if start is None or end is None or end <= start:
+        return {
+            "period_start": None,
+            "period_end": None,
+            "calendar_configured": False,
+            "machines": [],
+        }
+
+    profiles = {
+        str(profile.get("machine_id")): profile
+        for profile in snapshot.get("machine_profiles", []) or []
+        if profile.get("machine_id")
+    }
+    calendar = snapshot.get("machine_calendar", {}) or {}
+    used_machine_ids = sorted({str(item.get("machine_id")) for item in schedule})
+    machines = []
+    for machine_id in used_machine_ids:
+        profile = profiles.get(machine_id, {})
+        available_minutes = available_minutes_for_profile(calendar, profile, start, end)
+        machines.append(
+            {
+                "machine_id": machine_id,
+                "machine_name": profile.get("machine_name") or "",
+                "available_minutes": round(available_minutes, 4),
+            }
+        )
+    return {
+        "period_start": start.isoformat(timespec="seconds"),
+        "period_end": end.isoformat(timespec="seconds"),
+        "calendar_configured": bool(
+            calendar.get("weekly_shifts")
+            or calendar.get("special_shifts")
+            or calendar.get("special_rules")
+        ),
+        "machines": machines,
+    }
+
+
+def _load_period_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+
+
 def _finite_number(*values: Any) -> float | None:
     for value in values:
         if isinstance(value, bool):
@@ -2160,13 +2471,19 @@ def _machine_utilization(result: dict[str, Any]) -> float | None:
     return 1.0 - idle_rate
 
 
+def _tardiness_count(result: dict[str, Any]) -> float | None:
+    kpis = result.get("kpis", {}) or {}
+    objectives = result.get("best_objectives", {}) or {}
+    return _finite_number(kpis.get("tardiness_count"), objectives.get("tardiness_count"))
+
+
 def _on_time_delivery_rate(result: dict[str, Any]) -> float | None:
     kpis = result.get("kpis", {}) or {}
     objectives = result.get("best_objectives", {}) or {}
     direct = _finite_number(kpis.get("on_time_delivery_rate"), objectives.get("on_time_delivery_rate"))
     if direct is not None:
         return direct / 100.0 if abs(direct) > 1 else direct
-    tardy_count = _finite_number(kpis.get("tardiness_count"), objectives.get("tardiness_count"))
+    tardy_count = _tardiness_count(result)
     metadata = result.get("metadata", {}) or {}
     order_count = _finite_number(metadata.get("order_count"))
     if not order_count:
@@ -2253,6 +2570,14 @@ def _version_metric_comparison(
             "lower",
         ),
         _metric_row(
+            "tardiness_count",
+            "延期订单数",
+            _tardiness_count(left_result),
+            _tardiness_count(right_result),
+            "count",
+            "lower",
+        ),
+        _metric_row(
             "machine_utilization",
             "设备利用率",
             _machine_utilization(left_result),
@@ -2302,3 +2627,114 @@ def _version_score_comparison(
         else None
     )
     return comparison
+
+
+def compare_version_core_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """提取多个计划版本的核心指标，不返回排程明细或工序差异。"""
+    metric_specs: list[
+        tuple[str, str, str, str, Callable[[dict[str, Any]], float | None]]
+    ] = [
+        ("comprehensive_score", "综合得分", "score", "higher", _topsis_score),
+        (
+            "makespan",
+            "最大完工时间",
+            "hours",
+            "lower",
+            lambda result: _duration_hours(result, "makespan", "makespan_hours"),
+        ),
+        ("tardiness_count", "延期订单数", "count", "lower", _tardiness_count),
+        (
+            "total_tardiness",
+            "总延期",
+            "hours",
+            "lower",
+            lambda result: _duration_hours(
+                result, "total_tardiness", "total_tardiness_hours"
+            ),
+        ),
+        (
+            "machine_utilization",
+            "设备利用率",
+            "percent",
+            "higher",
+            _machine_utilization,
+        ),
+        (
+            "on_time_delivery_rate",
+            "按期交付率",
+            "percent",
+            "higher",
+            _on_time_delivery_rate,
+        ),
+        (
+            "wip_waiting",
+            "等待时间",
+            "hours",
+            "lower",
+            lambda result: _duration_hours(
+                result, "wip_waiting", "total_waiting_hours"
+            ),
+        ),
+    ]
+
+    versions: list[dict[str, Any]] = []
+    for record in records:
+        result_value = record.get("result_json") or {}
+        if isinstance(result_value, str):
+            try:
+                result = json.loads(result_value)
+            except json.JSONDecodeError:
+                result = {}
+        else:
+            result = result_value if isinstance(result_value, dict) else {}
+
+        metrics: dict[str, float | int | None] = {}
+        for key, _, unit, _, extractor in metric_specs:
+            value = extractor(result)
+            if value is None:
+                metrics[key] = None
+            elif unit == "count" and abs(value - round(value)) < 1e-9:
+                metrics[key] = int(round(value))
+            else:
+                metrics[key] = round(value, 6 if unit == "score" else 4)
+        versions.append(
+            {
+                "version_id": record.get("version_id"),
+                "version_no": record.get("version_no"),
+                "schedule_type": record.get("schedule_type"),
+                "status": record.get("status"),
+                "created_at": record.get("created_at"),
+                "metrics": metrics,
+            }
+        )
+
+    metric_definitions: list[dict[str, Any]] = []
+    for key, label, unit, better_when, _ in metric_specs:
+        available = [
+            (version["version_id"], version["metrics"].get(key))
+            for version in versions
+            if version["metrics"].get(key) is not None
+        ]
+        best_version_ids: list[str] = []
+        if available:
+            best_value = (
+                max(value for _, value in available)
+                if better_when == "higher"
+                else min(value for _, value in available)
+            )
+            best_version_ids = [
+                str(version_id)
+                for version_id, value in available
+                if abs(float(value) - float(best_value)) < 1e-9
+            ]
+        metric_definitions.append(
+            {
+                "key": key,
+                "label": label,
+                "unit": unit,
+                "better_when": better_when,
+                "best_version_ids": best_version_ids,
+            }
+        )
+
+    return {"versions": versions, "metric_definitions": metric_definitions}

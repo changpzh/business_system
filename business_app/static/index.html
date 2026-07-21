@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>APS 生产排程业务系统</title>
   <link rel="stylesheet" href="/assets/styles.css?v=20260715-14">
-  <link rel="stylesheet" href="/assets/comparison.css?v=20260715-3">
-  <link rel="stylesheet" href="/assets/premium.css?v=20260715-1">
+  <link rel="stylesheet" href="/assets/comparison.css?v=20260721-4">
+  <link rel="stylesheet" href="/assets/premium.css?v=20260721-10">
 </head>
 <body>
   <div id="loginView" class="login-page">
@@ -58,9 +58,10 @@
   <div id="modal" class="modal hidden"><div class="modal-backdrop" data-close-modal></div><section class="modal-card"><header><h3 id="modalTitle"></h3><button data-close-modal>×</button></header><div id="modalBody" class="modal-body"></div></section></div>
   <div id="ganttTooltip" class="gantt-tooltip hidden"></div>
   <div id="lockInfoOverlay" class="lock-info-overlay hidden" onclick="if(event.target===this)closeLockInfo()"><section class="lock-info-card"><header><div><small>LOCK DETAILS</small><h3>工序锁定信息</h3></div><button type="button" onclick="closeLockInfo()">×</button></header><div id="lockInfoBody" class="lock-info-body"></div></section></div>
+  <div id="criticalPathOverlay" class="critical-path-overlay hidden" onclick="if(event.target===this)closeCriticalPathInfo()"><section class="critical-path-card"><header><div><small>CRITICAL PATH</small><h3>关键路径分析</h3></div><button type="button" onclick="closeCriticalPathInfo()">×</button></header><div id="criticalPathBody" class="critical-path-body"></div></section></div>
   <div id="toast" class="toast hidden"></div>
   <div id="processContextMenu" class="process-context-menu hidden"></div>
   <script src="/assets/constants.js?v=20260716-1"></script>
-  <script src="/assets/app.js?v=20260716-2"></script>
+  <script src="/assets/app.js?v=20260721-10"></script>
 </body>
 </html>

@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .algorithm_client import algorithm_client
@@ -26,6 +26,8 @@ from .constants import (
     DEPLOYMENT_PROCESS_TYPE_DEBUG,
     HEALTH_STATUS_DOWN,
     HEALTH_STATUS_UP,
+    SCHEDULE_TYPES,
+    TASK_ACTIVE_STATUSES,
     TASK_STATUS_FAILED,
     TASK_STATUS_QUEUED,
     TASK_STATUS_SUCCEEDED,
@@ -42,9 +44,16 @@ from .domain import (
     allowed_schedule_types,
     order_visible_in_deployment,
     resolve_task_schedule_type,
+    schedule_type_for_order_business_type,
 )
 from .security import create_token, decode_token, verify_password
-from .services import ENTITY_CONFIG, build_effective_schedule, build_snapshot, compare_versions, count_schedule_processes, create_task, execute_process_adjustment, execute_task, ga_parameters_for_process_count, is_manually_locked, lock_process, next_working_day_shift_start, parse_json_columns, preview_process_adjustment, publish_version, review_schedule_version, save_task_result, select_calendar, task_run_summary, unlock_process, validate_snapshot
+from .resource_calendar_validation import raise_resource_calendar_errors
+from .temperature_validation import (
+    machine_temperature_range,
+    raise_order_temperature_errors,
+)
+from .worker_skills import raise_order_skill_errors, raise_worker_profile_errors
+from .services import ENTITY_CONFIG, build_effective_schedule, build_machine_load_context, build_snapshot, compare_version_core_metrics, compare_versions, count_schedule_processes, create_task, execute_process_adjustment, execute_task, ga_parameters_for_process_count, is_manually_locked, lock_process, next_working_day_shift_start, parse_json_columns, preview_process_adjustment, publish_version, review_schedule_version, save_task_result, select_calendar, task_run_summary, unlock_process, validate_resource_group_preference_fields, validate_snapshot
 from .system_configuration import get_system_configuration, update_system_configuration
 
 
@@ -89,6 +98,16 @@ def ensure_schedule_type_access(connection, schedule_type: str) -> None:
     configuration = get_system_configuration(connection)
     if str(schedule_type) not in allowed_schedule_types(configuration["deployment_process_type"]):
         raise HTTPException(status_code=404, detail="记录不属于当前部署业务单元")
+
+
+def raise_master_temperature_errors(entity_type: str, record: dict[str, Any], label: str) -> None:
+    if entity_type == "machine":
+        machine_temperature_range(record, label)
+    elif entity_type == "worker":
+        raise_worker_profile_errors(record, label)
+    elif entity_type == "order":
+        raise_order_temperature_errors(record, label)
+        raise_order_skill_errors(record, label)
 
 
 @app.get("/health")
@@ -449,6 +468,20 @@ def import_snapshot(
             for record in records:
                 if not isinstance(record, dict) or not record.get(id_field):
                     raise HTTPException(status_code=422, detail=f"{snapshot_key} 记录缺少 {id_field}")
+                try:
+                    raise_master_temperature_errors(
+                        entity_type,
+                        record,
+                        f"{snapshot_key} {record.get(id_field)}",
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                if entity_type in {"machine", "worker"}:
+                    label = "设备" if entity_type == "machine" else "人员"
+                    try:
+                        raise_resource_calendar_errors(record, f"{label} {record.get(id_field)}")
+                    except ValueError as exc:
+                        raise HTTPException(status_code=422, detail=str(exc)) from exc
                 if entity_type == "order" and not order_visible_in_deployment(
                     record.get("order_business_type"), configuration["deployment_process_type"]
                 ):
@@ -489,6 +522,71 @@ def list_master(entity_type: str, _: dict[str, Any] = Depends(current_user)) -> 
             )
         ]
     return records
+
+
+@app.delete("/api/master-data/{entity_type}")
+def delete_master_batch(
+    entity_type: str,
+    schedule_type: str | None = None,
+    user: dict[str, Any] = Depends(require_roles(USER_ROLE_ADMIN, USER_ROLE_PLANNER)),
+) -> dict[str, Any]:
+    if entity_type not in ENTITY_CONFIG:
+        raise HTTPException(status_code=404, detail="未知主数据类型")
+
+    scoped_entity_types = {"order", "calendar"}
+    normalized_schedule_type = str(schedule_type or "").strip().lower()
+    if entity_type in scoped_entity_types:
+        if normalized_schedule_type not in SCHEDULE_TYPES:
+            raise HTTPException(status_code=422, detail="订单和日历批量删除必须指定有效的 schedule_type")
+    elif normalized_schedule_type:
+        raise HTTPException(status_code=422, detail="当前主数据类型不支持 schedule_type 删除范围")
+
+    with db() as connection:
+        if entity_type == "order":
+            ensure_schedule_type_access(connection, normalized_schedule_type)
+        rows = connection.execute(
+            "SELECT entity_id,payload_json FROM master_records WHERE entity_type=? ORDER BY entity_id",
+            (entity_type,),
+        ).fetchall()
+        if entity_type == "order":
+            rows = [
+                row
+                for row in rows
+                if schedule_type_for_order_business_type(json.loads(row["payload_json"]).get("order_business_type"))
+                == normalized_schedule_type
+            ]
+        elif entity_type == "calendar":
+            rows = [
+                row
+                for row in rows
+                if str(json.loads(row["payload_json"]).get("schedule_type") or "").lower()
+                == normalized_schedule_type
+            ]
+
+        entity_ids = [str(row["entity_id"]) for row in rows]
+        if entity_ids:
+            connection.executemany(
+                "DELETE FROM master_records WHERE entity_type=? AND entity_id=?",
+                [(entity_type, entity_id) for entity_id in entity_ids],
+            )
+        audit(
+            connection,
+            user["username"],
+            AUDIT_ACTION_MASTER_DATA_DELETED,
+            entity_type,
+            normalized_schedule_type or "all",
+            {
+                "batch": True,
+                "count": len(entity_ids),
+                "schedule_type": normalized_schedule_type or None,
+            },
+        )
+    return {
+        "message": "批量删除成功",
+        "entity_type": entity_type,
+        "schedule_type": normalized_schedule_type or None,
+        "deleted": len(entity_ids),
+    }
 
 
 @app.get("/api/master-data/{entity_type}/batch")
@@ -532,6 +630,20 @@ def import_master_batch(
         entity_id = str(record.get(id_field, "")).strip()
         if not entity_id:
             raise HTTPException(status_code=422, detail=f"第 {index + 1} 条记录缺少 {id_field}")
+        try:
+            raise_master_temperature_errors(entity_type, record, f"第 {index + 1} 条记录")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if entity_type in {"machine", "worker"}:
+            label = "设备" if entity_type == "machine" else "人员"
+            try:
+                raise_resource_calendar_errors(record, f"{label} {entity_id}")
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if entity_type == "resource_group":
+            errors = validate_resource_group_preference_fields(record)
+            if errors:
+                raise HTTPException(status_code=422, detail="；".join(errors))
         if entity_id in seen_ids:
             raise HTTPException(status_code=422, detail=f"批量文件中编号重复: {entity_id}")
         if order_configuration and not order_visible_in_deployment(
@@ -572,6 +684,20 @@ def put_master(
     id_field = ENTITY_CONFIG[entity_type][1]
     if str(payload.get(id_field, "")) != entity_id:
         raise HTTPException(status_code=422, detail=f"请求路径与 {id_field} 不一致")
+    try:
+        raise_master_temperature_errors(entity_type, payload, f"{entity_type} {entity_id}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if entity_type in {"machine", "worker"}:
+        label = "设备" if entity_type == "machine" else "人员"
+        try:
+            raise_resource_calendar_errors(payload, f"{label} {entity_id}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if entity_type == "resource_group":
+        errors = validate_resource_group_preference_fields(payload)
+        if errors:
+            raise HTTPException(status_code=422, detail="；".join(errors))
     if entity_type == "calendar" and payload.get("schedule_type") not in {"machining", "heat_treatment", "assembly"}:
         raise HTTPException(status_code=422, detail="日历必须指定 machining、heat_treatment 或 assembly")
     with db() as connection:
@@ -737,6 +863,177 @@ def get_task(task_id: str, _: dict[str, Any] = Depends(current_user)) -> dict[st
     return parse_json_columns(dict(row), "request_json", "snapshot_json", "response_json")
 
 
+@app.get("/api/tasks/{task_id}/summary")
+def get_task_summary(task_id: str, _: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """返回任务弹框需要的轻量摘要，避免传输并渲染完整快照和排程结果。"""
+    with db() as connection:
+        row = connection.execute(
+            """SELECT t.task_id,t.schedule_type,t.mode,t.dispatching_rule,t.status,t.error_message,
+                      t.created_by,t.created_at,t.started_at,t.completed_at,
+                      json_extract(t.request_json,'$.schedule_start') AS schedule_start,
+                      json_extract(t.request_json,'$.config_overrides') AS config_overrides_json,
+                      json_extract(t.request_json,'$.local_adjustments') AS local_adjustments_json,
+                      json_array_length(t.snapshot_json,'$.order_processes') AS order_count,
+                      COALESCE((
+                          SELECT SUM(json_array_length(order_row.value,'$.processes'))
+                          FROM json_each(t.snapshot_json,'$.order_processes') AS order_row
+                      ),0) AS process_count,
+                      json_array_length(t.snapshot_json,'$.machine_profiles') AS machine_count,
+                      json_array_length(t.snapshot_json,'$.worker_profiles') AS worker_count,
+                      json_array_length(t.snapshot_json,'$.resource_group_profiles') AS resource_group_count,
+                      json_type(t.snapshot_json,'$.machine_calendar') AS calendar_type,
+                      length(CAST(t.request_json AS BLOB)) AS request_bytes,
+                      length(CAST(t.snapshot_json AS BLOB)) AS snapshot_bytes,
+                      length(CAST(t.response_json AS BLOB)) AS response_bytes,
+                      json_extract(t.response_json,'$.status') AS response_status,
+                      json_extract(t.response_json,'$.completed_at') AS response_completed_at,
+                      json_extract(t.response_json,'$.error') AS response_error_json,
+                      json_extract(t.response_json,'$.result.metadata.schedule_type') AS result_schedule_type,
+                      json_extract(t.response_json,'$.result.metadata.mode') AS result_mode,
+                      json_extract(t.response_json,'$.result.metadata.dispatching_rule') AS result_dispatching_rule,
+                      json_extract(t.response_json,'$.result.metadata.generated_at') AS result_generated_at,
+                      json_extract(t.response_json,'$.result.metadata.schedule_start') AS result_schedule_start,
+                      json_extract(t.response_json,'$.result.metadata.order_count') AS result_order_count,
+                      json_extract(t.response_json,'$.result.metadata.task_count') AS result_task_count,
+                      json_extract(t.response_json,'$.result.metadata.optimization_mode') AS optimization_mode,
+                      json_extract(t.response_json,'$.result.metadata.optimizer') AS optimizer_json,
+                      json_extract(t.response_json,'$.result.kpis') AS kpis_json,
+                      json_extract(t.response_json,'$.result.best_objectives') AS best_objectives_json,
+                      json_array_length(t.response_json,'$.result.schedule') AS schedule_count,
+                      json_array_length(t.response_json,'$.result.pareto_front') AS pareto_count,
+                      json_array_length(t.response_json,'$.result.optimization_trace') AS trace_count
+               FROM schedule_tasks AS t
+               WHERE t.task_id=?""",
+            (task_id,),
+        ).fetchone()
+        if row:
+            ensure_schedule_type_access(connection, row["schedule_type"])
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    item = dict(row)
+
+    def load_json_value(key: str, default: Any) -> Any:
+        value = item.get(key)
+        if value in (None, ""):
+            return default
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+
+    response_available = bool(item.get("response_bytes"))
+    response_summary = {
+        "task_id": item["task_id"],
+        "status": item.get("response_status") or item["status"],
+        "completed_at": item.get("response_completed_at") or item.get("completed_at"),
+        "error": load_json_value("response_error_json", None),
+        "result": {
+            "metadata": {
+                "schedule_type": item.get("result_schedule_type"),
+                "mode": item.get("result_mode"),
+                "dispatching_rule": item.get("result_dispatching_rule"),
+                "generated_at": item.get("result_generated_at"),
+                "schedule_start": item.get("result_schedule_start"),
+                "order_count": item.get("result_order_count"),
+                "task_count": item.get("result_task_count"),
+                "optimization_mode": item.get("optimization_mode"),
+                "optimizer": load_json_value("optimizer_json", None),
+            },
+            "kpis": load_json_value("kpis_json", None),
+            "best_objectives": load_json_value("best_objectives_json", None),
+            "schedule_count": item.get("schedule_count") or 0,
+            "pareto_count": item.get("pareto_count") or 0,
+            "optimization_trace_count": item.get("trace_count") or 0,
+        },
+    }
+    if not response_available:
+        response_summary = {
+            "status": item["status"],
+            "message": (
+                "任务尚未完成，暂无算法结果"
+                if item["status"] in TASK_ACTIVE_STATUSES
+                else "暂无结果数据"
+            ),
+        }
+
+    return {
+        "task_id": item["task_id"],
+        "schedule_type": item["schedule_type"],
+        "mode": item["mode"],
+        "dispatching_rule": item["dispatching_rule"],
+        "status": item["status"],
+        "error_message": item.get("error_message"),
+        "created_by": item["created_by"],
+        "created_at": item["created_at"],
+        "started_at": item.get("started_at"),
+        "completed_at": item.get("completed_at"),
+        "request": {
+            "task_id": item["task_id"],
+            "schedule_type": item["schedule_type"],
+            "mode": item["mode"],
+            "dispatching_rule": item["dispatching_rule"],
+            "schedule_start": item.get("schedule_start"),
+            "config_overrides": load_json_value("config_overrides_json", {}),
+            "local_adjustments": load_json_value("local_adjustments_json", []),
+        },
+        "snapshot_summary": {
+            "order_count": item.get("order_count") or 0,
+            "process_count": item.get("process_count") or 0,
+            "machine_count": item.get("machine_count") or 0,
+            "worker_count": item.get("worker_count") or 0,
+            "resource_group_count": item.get("resource_group_count") or 0,
+            "calendar_configured": bool(item.get("calendar_type")),
+        },
+        "response": response_summary,
+        "payload_sizes": {
+            "request": item.get("request_bytes") or 0,
+            "snapshot": item.get("snapshot_bytes") or 0,
+            "response": item.get("response_bytes") or 0,
+        },
+        "response_available": response_available,
+    }
+
+
+@app.get("/api/tasks/{task_id}/payload/{payload_kind}")
+def download_task_payload(
+    task_id: str,
+    payload_kind: str,
+    _: dict[str, Any] = Depends(current_user),
+) -> Response:
+    """流式返回原始任务 JSON，供用户按需下载，不在弹框 DOM 中展开。"""
+    columns = {
+        "request": "request_json",
+        "snapshot": "snapshot_json",
+        "response": "response_json",
+    }
+    column = columns.get(payload_kind)
+    if not column:
+        raise HTTPException(status_code=422, detail="payload_kind 必须为 request、snapshot 或 response")
+    with db() as connection:
+        row = connection.execute(
+            f"SELECT task_id,schedule_type,{column} AS payload_json FROM schedule_tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if row:
+            ensure_schedule_type_access(connection, row["schedule_type"])
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if not row["payload_json"]:
+        raise HTTPException(status_code=404, detail="当前任务暂无该类数据")
+    safe_task_id = "".join(character if character.isalnum() or character in "-_" else "_" for character in task_id)
+    return Response(
+        content=row["payload_json"],
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_task_id}-{payload_kind}.json"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.post("/api/tasks/{task_id}/retry", status_code=202)
 def retry_task(
     task_id: str,
@@ -852,11 +1149,21 @@ def get_version(version_id: str, _: dict[str, Any] = Depends(current_user)) -> d
     record.pop("configured_generations", None)
     result = json.loads(record.pop("result_json"))
     snapshot = json.loads(record.pop("snapshot_json"))
+    record["machine_load_context"] = build_machine_load_context(
+        snapshot,
+        result,
+        run_summary.get("schedule_start"),
+    )
     process_index = {
         str(process.get("process_id")): process
         for order in snapshot.get("order_processes", [])
         for process in order.get("processes", [])
         if process.get("process_id")
+    }
+    machine_index = {
+        str(machine.get("machine_id")): machine
+        for machine in snapshot.get("machine_profiles", [])
+        if machine.get("machine_id")
     }
     current_process_index = {
         str(process.get("process_id")): process
@@ -867,8 +1174,11 @@ def get_version(version_id: str, _: dict[str, Any] = Depends(current_user)) -> d
     }
     for item in result.get("schedule", []):
         process_id = str(item.get("process_id"))
+        machine_id = str(item.get("machine_id") or "")
         source = process_index.get(process_id, {})
         current = current_process_index.get(process_id, {})
+        if machine_id and not item.get("machine_name"):
+            item["machine_name"] = machine_index.get(machine_id, {}).get("machine_name") or ""
         if "material_ready_time" not in item:
             item["material_ready_time"] = source.get("material_ready_time") or ""
         source_locks = source.get("locks") or {}
@@ -958,6 +1268,38 @@ def compare(left_id: str, right_id: str, _: dict[str, Any] = Depends(current_use
         ensure_schedule_type_access(connection, left["schedule_type"])
         ensure_schedule_type_access(connection, right["schedule_type"])
     return compare_versions(dict(left), dict(right))
+
+
+@app.post("/api/versions/compare-metrics")
+def compare_metrics(
+    payload: dict[str, Any], _: dict[str, Any] = Depends(current_user)
+) -> dict[str, Any]:
+    raw_version_ids = payload.get("version_ids")
+    if not isinstance(raw_version_ids, list):
+        raise HTTPException(status_code=422, detail="version_ids 必须是版本编号数组")
+    version_ids: list[str] = []
+    for value in raw_version_ids:
+        version_id = str(value).strip() if isinstance(value, str) else ""
+        if version_id and version_id not in version_ids:
+            version_ids.append(version_id)
+    if len(version_ids) < 2:
+        raise HTTPException(status_code=422, detail="请至少选择两个不同的计划版本")
+
+    placeholders = ",".join("?" for _ in version_ids)
+    with db() as connection:
+        rows = connection.execute(
+            f"""SELECT version_id,version_no,schedule_type,status,created_at,result_json
+                  FROM schedule_versions
+                 WHERE version_id IN ({placeholders})""",
+            version_ids,
+        ).fetchall()
+        records_by_id = {row["version_id"]: dict(row) for row in rows}
+        missing = [version_id for version_id in version_ids if version_id not in records_by_id]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"计划版本不存在：{', '.join(missing)}")
+        for version_id in version_ids:
+            ensure_schedule_type_access(connection, records_by_id[version_id]["schedule_type"])
+    return compare_version_core_metrics([records_by_id[version_id] for version_id in version_ids])
 
 
 @app.get("/api/audit-logs")

@@ -166,10 +166,74 @@ USER_ROLE_CHOICES: Final = (
 
 # 主数据与排程展示状态
 RECORD_STATUS_ACTIVE: Final = "ACTIVE"
+CALENDAR_STATUS_CONFIRMED: Final = "CONFIRMED"
+CALENDAR_STATUS_APPROVED: Final = "APPROVED"
+CALENDAR_RULE_STATUSES: Final = frozenset(
+    {RECORD_STATUS_ACTIVE, CALENDAR_STATUS_CONFIRMED, CALENDAR_STATUS_APPROVED}
+)
+CALENDAR_ENTRY_STATUSES: Final = frozenset(
+    {*CALENDAR_RULE_STATUSES, "DRAFT", "INACTIVE", "CANCELLED"}
+)
+RESOURCE_CALENDAR_FIELDS: Final = ("unavailability", "availability_overrides")
 SCHEDULE_RECORD_STATUS_EFFECTIVE: Final = "EFFECTIVE"
 SCHEDULE_RECORD_STATUS_HISTORICAL: Final = "HISTORICAL"
 SCHEDULE_RECORD_STATUS_UNSCHEDULED: Final = "UNSCHEDULED"
 SCHEDULE_RECORD_STATUS_UNKNOWN: Final = "UNKNOWN"
+
+# 关键路径公开字段
+CRITICAL_PATH_PROCESS_FIELDS: Final = (
+    "structural_critical",
+    "structural_path_ids",
+    "structural_path_count",
+    "structural_total_slack_minutes",
+    "structural_free_slack_minutes",
+    "structural_remaining_path_minutes",
+    "delivery_critical",
+    "delivery_critical_level",
+    "delivery_path_ids",
+    "delivery_path_count",
+    "delivery_total_slack_minutes",
+    "delivery_free_slack_minutes",
+    "delivery_remaining_path_minutes",
+    "resource_critical",
+    "resource_critical_reasons",
+    "resource_makespan_critical",
+    "resource_delivery_critical",
+    "resource_delivery_critical_level",
+    "resource_path_ids",
+    "resource_path_count",
+    "resource_total_slack_minutes",
+    "resource_delivery_slack_minutes",
+    "resource_free_slack_minutes",
+    "resource_remaining_path_minutes",
+    "theoretical_earliest_start_time",
+    "theoretical_earliest_finish_time",
+    "structural_latest_start_time",
+    "structural_latest_finish_time",
+    "delivery_latest_start_time",
+    "delivery_latest_finish_time",
+    "order_delivery_slack_minutes",
+    "resource_actual_start_time",
+    "resource_actual_finish_time",
+    "resource_latest_start_time",
+    "resource_latest_finish_time",
+    "resource_predecessor_ids",
+    "resource_successor_ids",
+    "resource_constraint_types",
+)
+LEGACY_CRITICAL_PATH_PROCESS_FIELDS: Final = (
+    "is_critical",
+    "critical_path_ids",
+    "critical_path_count",
+    "critical_level",
+    "earliest_start_time",
+    "earliest_finish_time",
+    "latest_start_time",
+    "latest_finish_time",
+    "total_slack_minutes",
+    "free_slack_minutes",
+    "remaining_path_minutes",
+)
 
 # 版本差异类型
 CHANGE_TYPE_ADDED: Final = "ADDED"
@@ -209,6 +273,7 @@ ADJUSTMENT_CODE_DOWNSTREAM_LOCK_CONFLICT: Final = "DOWNSTREAM_LOCK_CONFLICT"
 ADJUSTMENT_CODE_TOOLING_CHANGE: Final = "TOOLING_CHANGE"
 ADJUSTMENT_CODE_BASE_CHANGEOVER: Final = "BASE_CHANGEOVER"
 ADJUSTMENT_CODE_DUE_DATE_DELAY: Final = "DUE_DATE_DELAY"
+ADJUSTMENT_CODE_CRITICAL_PATH_OVERRIDE: Final = "CRITICAL_PATH_OVERRIDE"
 
 # 算法约束编码
 CONSTRAINT_CODE_TIME_RANGE_INVALID: Final = "TIME_RANGE_INVALID"

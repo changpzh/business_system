@@ -38,7 +38,7 @@ if not exist "%PYTHON%" (
     echo [1/5] 已找到业务虚拟环境。
 )
 
-"%PYTHON%" -c "import fastapi, uvicorn, pydantic, httpx" >nul 2>&1
+"%PYTHON%" -c "import fastapi, lunardate, uvicorn, pydantic, httpx" >nul 2>&1
 if errorlevel 1 (
     echo [2/5] 依赖不完整，正在安装 requirements.txt ...
     "%PYTHON%" -m pip install -r "%ROOT%requirements.txt"

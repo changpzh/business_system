@@ -538,6 +538,269 @@ textarea,
   font-size: 12px;
 }
 
+.weight-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 14px;
+}
+
+.weight-section-head h4 {
+  flex: 0 0 auto;
+  margin: 7px 0 0;
+}
+
+.weight-preset-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.weight-preset-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.weight-preset-button {
+  border: 1px solid #cfdad4;
+  border-radius: 8px;
+  background: #fff;
+  color: #52645b;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color .16s, background .16s, color .16s, box-shadow .16s;
+}
+
+.weight-preset-button:hover {
+  border-color: #8eb6a4;
+  color: var(--green);
+  background: #f5faf7;
+}
+
+.weight-preset-button.active {
+  border-color: #6fa58d;
+  background: #dcefe5;
+  color: #176044;
+  box-shadow: inset 0 0 0 1px rgba(36, 119, 91, .08);
+}
+
+.weight-preset-state {
+  flex: 0 0 auto;
+  min-width: 86px;
+  color: var(--green2);
+  font-size: 10px;
+  font-weight: 800;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 新建排程任务：桌面端横向紧凑布局，提交区始终可见 */
+.modal-card.schedule-task-modal {
+  width: min(1320px, 98vw);
+  max-height: 96vh;
+}
+
+.schedule-task-modal > header {
+  padding: 16px 22px;
+}
+
+.schedule-task-modal .modal-body {
+  max-height: calc(96vh - 64px);
+  padding: 15px 20px 0;
+}
+
+.schedule-task-modal #taskForm {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 14px;
+  align-items: start;
+}
+
+.schedule-task-modal #taskForm > label {
+  gap: 6px;
+  margin-bottom: 0;
+  font-size: 12px;
+}
+
+.schedule-task-modal #taskForm input,
+.schedule-task-modal #taskForm select,
+.schedule-task-modal #taskForm textarea {
+  padding: 10px 12px;
+}
+
+.schedule-task-modal #protectionField {
+  grid-column: span 2;
+}
+
+.schedule-task-modal #taskForm > .task-config-section {
+  grid-column: span 2;
+  align-self: stretch;
+  margin-bottom: 0;
+  padding: 13px 14px;
+}
+
+.schedule-task-modal .ga-config-head {
+  gap: 10px;
+  margin-bottom: 9px;
+}
+
+.schedule-task-modal .ga-config-head > span {
+  padding: 5px 8px;
+  font-size: 9px;
+}
+
+.schedule-task-modal .ga-parameter-grid {
+  gap: 9px;
+}
+
+.schedule-task-modal .ga-config-section > .field-help {
+  margin: 9px 0 0;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.schedule-task-modal .weight-section-head {
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.schedule-task-modal .weight-section-head h4 {
+  margin-top: 5px;
+}
+
+.schedule-task-modal .weight-preset-controls {
+  gap: 7px;
+}
+
+.schedule-task-modal .weight-preset-buttons {
+  gap: 5px;
+}
+
+.schedule-task-modal .weight-preset-button {
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.schedule-task-modal .weight-preset-state {
+  min-width: 76px;
+  font-size: 9px;
+}
+
+.schedule-task-modal .weight-grid {
+  gap: 8px 10px;
+}
+
+.schedule-task-modal .weight-grid label {
+  gap: 4px;
+  font-size: 11px;
+}
+
+.schedule-task-modal .weight-grid input {
+  margin-top: 3px;
+}
+
+.schedule-task-modal .weight-total {
+  margin: 7px 0 0;
+  font-size: 11px;
+}
+
+.schedule-task-modal .task-json-field,
+.schedule-task-modal .task-local-field {
+  grid-column: 1 / -1;
+}
+
+.schedule-task-modal #taskForm.local-mode .task-json-field,
+.schedule-task-modal #taskForm.local-mode .task-local-field {
+  grid-column: span 2;
+}
+
+.schedule-task-modal .task-json-field textarea,
+.schedule-task-modal .task-local-field textarea {
+  min-height: 62px;
+  height: 62px;
+  line-height: 1.35;
+  resize: vertical;
+}
+
+.schedule-task-modal #taskForm > .form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  grid-column: 1 / -1;
+  margin: 0 -20px;
+  padding: 10px 20px 12px;
+  border-top: 1px solid var(--line);
+  background: rgba(255, 255, 255, .97);
+  box-shadow: 0 -10px 22px rgba(23, 79, 60, .06);
+  backdrop-filter: blur(8px);
+}
+
+.schedule-task-modal #taskForm > .form-actions .button.primary {
+  min-width: 150px;
+}
+
+.version-compare-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.version-select-control {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.version-select-control input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--green2);
+  cursor: pointer;
+}
+
+.version-select-control > span {
+  min-width: 0;
+}
+
+.version-select-control .record-sub {
+  display: block;
+}
+
+.version-select-all {
+  align-items: center;
+}
+
+.task-retry-button {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-width: 112px;
+  border: 1px solid #edc4c0;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.task-retry-button:hover:not(:disabled) {
+  border-color: #d68b84;
+  background: #f7d8d5;
+}
+
 /* 页签、主数据与生效计划 */
 .tabs {
   gap: 9px;
@@ -648,8 +911,88 @@ textarea,
   font-size: 13px;
 }
 
+.gantt-view[data-gantt-view="load"] .gantt-view-note {
+  align-items: flex-start;
+  line-height: 1.55;
+}
+
+.gantt-view[data-gantt-view="load"] .gantt-view-note .badge {
+  flex: 0 0 auto;
+}
+
 .gantt-label {
   font-size: 12px;
+}
+
+.critical-gantt-legend {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+
+.critical-gantt-legend > span {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 280px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8faf9;
+}
+
+.critical-gantt-legend i {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 25px;
+  height: 25px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.critical-gantt-legend i.delivery {
+  border: 1px solid #dca33a;
+  background: #fff7df;
+  color: #946109;
+}
+
+.critical-gantt-legend i.resource {
+  border: 1px solid #9c82bd;
+  background: #f5effb;
+  color: #66458d;
+}
+
+.critical-gantt-legend strong,
+.critical-gantt-legend small {
+  display: block;
+}
+
+.critical-gantt-legend strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.critical-gantt-legend small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+/* 结构路径保留在分析数据中，但不在甘特图中绘制。 */
+.gantt .critical-marker.structural,
+.gantt .critical-label-dot.structural,
+.gantt .order-critical-count .structural {
+  display: none !important;
+}
+
+.gantt .gantt-critical-structural {
+  border-top: 0;
 }
 
 /* 弹窗与表单 */
@@ -730,8 +1073,307 @@ textarea,
   font-size: 13px;
 }
 
+.task-snapshot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.task-snapshot-head strong,
+.task-snapshot-head span {
+  display: block;
+}
+
+.task-snapshot-head strong {
+  font-size: 13px;
+}
+
+.task-snapshot-head span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.task-snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.task-snapshot-grid > div {
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: white;
+}
+
+.task-snapshot-grid small,
+.task-snapshot-grid strong {
+  display: block;
+}
+
+.task-snapshot-grid small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.task-snapshot-grid strong {
+  margin-top: 4px;
+  font-size: 15px;
+}
+
+.task-summary-code {
+  min-height: 120px;
+  max-height: 320px;
+}
+
+.task-payload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (max-width: 800px) {
+  .task-snapshot-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .kpi-grid {
   gap: 12px;
+}
+
+.plan-modal .kpi-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.modal-card.plan-modal {
+  width: min(1440px, 98vw);
+}
+
+.machine-load-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.machine-load-period {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border: 1px solid #b9d8c9;
+  border-radius: 10px;
+  background: #f1f8f4;
+}
+
+.machine-load-period > span {
+  color: var(--green2);
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.machine-load-period > strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.machine-load-period > small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.machine-load-period.warning {
+  border-color: #e8c77d;
+  background: #fff9ec;
+}
+
+.machine-load-summary > div {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8faf8;
+}
+
+.machine-load-summary small,
+.machine-load-summary strong {
+  display: block;
+}
+
+.machine-load-summary small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.machine-load-summary strong {
+  margin-top: 5px;
+  font-size: 18px;
+}
+
+.machine-load-list {
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: white;
+}
+
+.machine-load-row {
+  display: grid;
+  grid-template-columns: 190px minmax(240px, 1fr) 255px;
+  align-items: center;
+  gap: 14px;
+  min-height: 56px;
+  padding: 9px 13px;
+  border-bottom: 1px solid #edf0ee;
+}
+
+.machine-load-row:last-child {
+  border-bottom: 0;
+}
+
+.machine-load-label strong,
+.machine-load-label small,
+.machine-load-value strong,
+.machine-load-value small {
+  display: block;
+}
+
+.machine-load-label strong {
+  font-size: 12px;
+}
+
+.machine-load-label small,
+.machine-load-value small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.machine-load-track {
+  height: 15px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #e7eeea;
+}
+
+.machine-load-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #24775b, #6fb394);
+}
+
+.machine-load-row.warning .machine-load-track i {
+  background: linear-gradient(90deg, #b87917, #e1aa43);
+}
+
+.machine-load-row.danger .machine-load-track i {
+  background: linear-gradient(90deg, #a53b34, #d45f56);
+}
+
+.machine-load-value {
+  text-align: right;
+}
+
+.machine-load-value strong {
+  font-size: 13px;
+}
+
+.machine-load-rates {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.machine-load-rates span {
+  border-radius: 6px;
+  background: #edf3f0;
+  color: #54645c;
+  padding: 3px 6px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.machine-load-rates b {
+  color: var(--ink);
+}
+
+.machine-load-rates span.warning {
+  background: #fff1d3;
+  color: #8b5c08;
+}
+
+.machine-load-rates span.danger {
+  background: #fae3e1;
+  color: #9a3630;
+}
+
+.machine-load-rates span.warning b,
+.machine-load-rates span.danger b {
+  color: inherit;
+}
+
+.plan-modal .version-parameter-panel {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+}
+
+.plan-modal .version-parameter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.plan-modal .version-parameter-head p {
+  margin: 0;
+}
+
+.plan-modal .version-parameter-grid {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.plan-modal .version-parameter-grid > div {
+  padding: 7px 9px;
+}
+
+.plan-modal .version-parameter-grid small {
+  font-size: 9px;
+}
+
+.plan-modal .version-parameter-grid strong {
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.plan-modal .version-config-details {
+  margin-top: 6px;
+}
+
+.plan-modal .critical-overview.compact {
+  justify-content: flex-end;
+  min-height: 0;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+}
+
+.plan-modal .critical-overview.compact .critical-overview-metrics {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.plan-modal .critical-overview.compact .critical-overview-metrics span {
+  padding: 5px 8px;
 }
 
 .kpi {
@@ -745,6 +1387,24 @@ textarea,
 
 .kpi strong {
   font-size: 19px;
+}
+
+@media (max-width: 1000px) {
+  .plan-modal .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .machine-load-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .machine-load-row {
+    grid-template-columns: 150px minmax(180px, 1fr) 220px;
+  }
+
+  .plan-modal .version-parameter-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 .version-parameter-panel {
@@ -833,6 +1493,18 @@ textarea,
     padding-right: 22px;
     padding-left: 22px;
   }
+
+  .schedule-task-modal #taskForm {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .schedule-task-modal #taskForm > .task-config-section,
+  .schedule-task-modal .task-json-field,
+  .schedule-task-modal .task-local-field,
+  .schedule-task-modal #taskForm.local-mode .task-json-field,
+  .schedule-task-modal #taskForm.local-mode .task-local-field {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 650px) {
@@ -871,6 +1543,20 @@ textarea,
     min-width: 100%;
   }
 
+  .weight-section-head,
+  .weight-preset-controls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .weight-preset-buttons {
+    justify-content: flex-start;
+  }
+
+  .weight-preset-state {
+    text-align: left;
+  }
+
   .master-record-toolbar .order-type-tabs,
   .master-record-toolbar .master-toolbar,
   .master-record-toolbar .master-toolbar .search {
@@ -888,6 +1574,48 @@ textarea,
 
   .modal-body {
     padding: 20px 18px 23px;
+  }
+
+  .schedule-task-modal .modal-body {
+    padding: 12px 14px 0;
+  }
+
+  .schedule-task-modal #taskForm {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-task-modal #taskForm > *,
+  .schedule-task-modal #protectionField,
+  .schedule-task-modal #taskForm > .task-config-section {
+    grid-column: 1;
+  }
+
+  .schedule-task-modal #taskForm > .form-actions {
+    margin-right: -14px;
+    margin-left: -14px;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+}
+
+@media (max-height: 800px) and (min-width: 1001px) {
+  .schedule-task-modal > header {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  .schedule-task-modal .modal-body {
+    padding-top: 10px;
+  }
+
+  .schedule-task-modal #taskForm {
+    row-gap: 7px;
+  }
+
+  .schedule-task-modal .task-json-field textarea,
+  .schedule-task-modal .task-local-field textarea {
+    min-height: 50px;
+    height: 50px;
   }
 }
 

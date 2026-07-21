@@ -8,6 +8,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from lunardate import LunarDate
+
 
 TEMP_DIR = tempfile.TemporaryDirectory()
 os.environ["DATABASE_PATH"] = str(Path(TEMP_DIR.name) / "test.db")
@@ -16,6 +18,7 @@ os.environ["SESSION_SECRET"] = "test-secret"
 from fastapi.testclient import TestClient
 
 from business_app.algorithm_client import algorithm_client
+from business_app.calendar_rules import available_minutes_for_profile, calendar_day_shifts
 from business_app.constants import ADJUSTMENT_CODE_PAST_TIME
 from business_app.database import db, initialize_database, now_text
 from business_app.main import app
@@ -24,6 +27,8 @@ from business_app.services import (
     _restore_batch_metadata_from_history,
     _sync_batch_metadata,
     build_effective_schedule,
+    build_machine_load_context,
+    compare_version_core_metrics,
     compare_versions,
     ga_parameters_for_process_count,
     is_manually_locked,
@@ -185,6 +190,143 @@ class BusinessSystemTests(unittest.TestCase):
         result = next_working_day_shift_start(calendar, datetime(2026, 7, 19, 10, 0))
         self.assertEqual(result, datetime(2026, 7, 20, 8, 30))
 
+    def test_next_working_day_skips_special_rule_holidays(self) -> None:
+        shifts = [{"name": "白班", "segments": [{"start": "08:00", "end": "17:00"}]}]
+        calendar = {
+            "day_shift_start": "08:00",
+            "weekly_shifts": {str(day): shifts for day in range(7)},
+            "special_shifts": {},
+            "special_rules": [
+                {
+                    "rule_type": "fixed_date_range",
+                    "month": 5,
+                    "day_start": 1,
+                    "day_end": 5,
+                    "shifts": [],
+                    "priority": 90,
+                }
+            ],
+        }
+
+        result = next_working_day_shift_start(calendar, datetime(2026, 4, 30, 10, 0))
+        self.assertEqual(result, datetime(2026, 5, 6, 8, 0))
+
+    def test_special_shift_overrides_holiday_rule_for_default_start(self) -> None:
+        shifts = [{"name": "白班", "segments": [{"start": "08:00", "end": "17:00"}]}]
+        calendar = {
+            "day_shift_start": "08:00",
+            "weekly_shifts": {str(day): shifts for day in range(7)},
+            "special_shifts": {
+                "2026-05-02": [
+                    {"name": "调休白班", "segments": [{"start": "10:00", "end": "14:00"}]}
+                ]
+            },
+            "special_rules": [
+                {
+                    "rule_type": "fixed_date_range",
+                    "month": 5,
+                    "day_start": 1,
+                    "day_end": 5,
+                    "shifts": [],
+                    "priority": 90,
+                }
+            ],
+        }
+
+        result = next_working_day_shift_start(calendar, datetime(2026, 4, 30, 10, 0))
+        self.assertEqual(result, datetime(2026, 5, 2, 10, 0))
+
+    def test_business_calendar_supports_lunar_special_rule(self) -> None:
+        holiday_start = LunarDate(2026, 1, 1).to_solar_date()
+        calendar = {
+            "weekly_shifts": {
+                str(day): [{"segments": [{"start": "08:00", "end": "17:00"}]}]
+                for day in range(7)
+            },
+            "special_rules": [
+                {
+                    "rule_type": "lunar",
+                    "lunar_month": 1,
+                    "lunar_day": 1,
+                    "duration_days": 7,
+                    "shifts": [],
+                }
+            ],
+        }
+
+        self.assertEqual(calendar_day_shifts(calendar, holiday_start), [])
+
+    def test_machine_calendar_available_minutes_include_overrides_and_downtime(self) -> None:
+        calendar = {
+            "weekly_shifts": {
+                "1": [
+                    {
+                        "segments": [
+                            {"start": "08:00", "end": "12:00"},
+                            {"start": "13:00", "end": "17:00"},
+                        ]
+                    }
+                ]
+            }
+        }
+        profile = {
+            "machine_id": "MC_TEST",
+            "status": "ACTIVE",
+            "availability_overrides": [
+                {
+                    "date": "2026-07-20",
+                    "status": "CONFIRMED",
+                    "segments": [{"start": "17:00", "end": "19:00"}],
+                }
+            ],
+            "unavailability": [
+                {
+                    "date": "2026-07-20",
+                    "status": "CONFIRMED",
+                    "segments": [{"start": "10:00", "end": "11:00"}],
+                }
+            ],
+        }
+        minutes = available_minutes_for_profile(
+            calendar,
+            profile,
+            datetime(2026, 7, 20, 8, 0),
+            datetime(2026, 7, 20, 19, 0),
+        )
+        self.assertEqual(minutes, 540.0)
+
+    def test_machine_load_context_uses_schedule_start_and_latest_finish(self) -> None:
+        snapshot = {
+            "machine_calendar": {
+                "weekly_shifts": {
+                    "1": [{"segments": [{"start": "08:00", "end": "17:00"}]}]
+                }
+            },
+            "machine_profiles": [
+                {
+                    "machine_id": "MC_TEST",
+                    "machine_name": "测试设备",
+                    "status": "ACTIVE",
+                    "unavailability": [],
+                    "availability_overrides": [],
+                }
+            ],
+        }
+        result = {
+            "schedule": [
+                {
+                    "machine_id": "MC_TEST",
+                    "plan_start_time": "2026-07-20T09:00:00",
+                    "plan_end_time": "2026-07-20T16:00:00",
+                }
+            ]
+        }
+        context = build_machine_load_context(snapshot, result, "2026-07-20T08:00:00")
+        self.assertEqual(context["period_start"], "2026-07-20T08:00:00")
+        self.assertEqual(context["period_end"], "2026-07-20T16:00:00")
+        self.assertEqual(context["machines"][0]["machine_name"], "测试设备")
+        self.assertEqual(context["machines"][0]["available_minutes"], 480.0)
+
     def test_calendar_selection_uses_schedule_type(self) -> None:
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
@@ -240,6 +382,132 @@ class BusinessSystemTests(unittest.TestCase):
         }
         order["material_grade"] = "   "
         self.assertTrue(any("允许合批但缺少 material_grade" in item for item in validate_snapshot(snapshot)))
+
+    def test_temperature_range_requires_full_machine_capability_coverage(self) -> None:
+        snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
+        order = next(item for item in snapshot["order_processes"] if item.get("order_id") == "DEMO_HEAT_ORDER")
+        process = order["processes"][0]
+        group = next(
+            item
+            for item in snapshot["resource_group_profiles"]
+            if item.get("resource_group_id") == process.get("resource_group_id")
+        )
+        machine_ids = {str(item["machine_id"]) for item in group.get("machines", [])}
+        for machine in snapshot["machine_profiles"]:
+            if str(machine.get("machine_id")) in machine_ids:
+                machine.setdefault("capabilities", {})["temp_range"] = [400, 900]
+
+        process["resource_requirements"] = {"temp_range": [900, 900]}
+        errors = validate_snapshot(snapshot)
+        self.assertFalse(any("温度要求" in item for item in errors), errors)
+
+        process["resource_requirements"] = {"temp_range": [500, 1200]}
+        errors = validate_snapshot(snapshot)
+        self.assertTrue(any("没有温度能力完整覆盖的设备" in item for item in errors), errors)
+
+        process["resource_requirements"] = {"temp_range_min": 500, "temp_range_max": 1200}
+        errors = validate_snapshot(snapshot)
+        self.assertTrue(any("不支持旧温度字段" in item for item in errors), errors)
+
+    def test_master_data_save_rejects_invalid_temperature_shapes(self) -> None:
+        machine = self.client.get("/api/master-data/machine", headers=self.headers).json()[0]["payload"]
+        machine.setdefault("capabilities", {})["temp_range"] = [900]
+        response = self.client.put(
+            f"/api/master-data/machine/{machine['machine_id']}",
+            json=machine,
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("两个数字", response.json()["detail"])
+
+        order = self.client.get("/api/master-data/order", headers=self.headers).json()[0]["payload"]
+        order["processes"][0]["resource_requirements"] = {
+            "temp_range_min": 500,
+            "temp_range_max": 1200,
+        }
+        response = self.client.put(
+            f"/api/master-data/order/{order['order_id']}",
+            json=order,
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("不支持旧温度字段", response.json()["detail"])
+
+    def test_worker_skills_schema_allows_missing_workshop_type(self) -> None:
+        worker_id = "WORKER_SKILLS_SCHEMA_TEST"
+        payload = {
+            "worker_id": worker_id,
+            "worker_name": "技能模型测试人员",
+            "status": "ACTIVE",
+            "skills": [],
+            "unavailability": [],
+            "availability_overrides": [],
+        }
+        try:
+            response = self.client.put(
+                f"/api/master-data/worker/{worker_id}",
+                json=payload,
+                headers=self.headers,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            saved = response.json()["payload"]
+            self.assertEqual(saved["skills"], [])
+            self.assertNotIn("skill_level", saved)
+            self.assertNotIn("workshop_type", saved)
+
+            payload["skills"] = "five_axis"
+            response = self.client.put(
+                f"/api/master-data/worker/{worker_id}",
+                json=payload,
+                headers=self.headers,
+            )
+            self.assertEqual(response.status_code, 422)
+            self.assertIn("字符串数组", response.json()["detail"])
+        finally:
+            self.client.delete(
+                f"/api/master-data/worker/{worker_id}",
+                headers=self.headers,
+            )
+
+    def test_snapshot_checks_required_skills_against_worker_skills(self) -> None:
+        snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
+        order = next(item for item in snapshot["order_processes"] if item.get("order_id") == "DEMO_MC_ORDER")
+        process = order["processes"][0]
+        group = next(
+            item
+            for item in snapshot["resource_group_profiles"]
+            if item.get("resource_group_id") == process.get("resource_group_id")
+        )
+        worker_ids = {str(item["worker_id"]) for item in group.get("workers", [])}
+        process["required_skills"] = ["five_axis"]
+        for worker in snapshot["worker_profiles"]:
+            if str(worker.get("worker_id")) in worker_ids:
+                worker["skills"] = []
+        errors = validate_snapshot(snapshot)
+        self.assertTrue(any("没有具备全部技能的人员" in item for item in errors), errors)
+
+        matching_worker = next(
+            worker for worker in snapshot["worker_profiles"] if str(worker.get("worker_id")) in worker_ids
+        )
+        matching_worker["skills"] = ["five_axis"]
+        errors = validate_snapshot(snapshot)
+        self.assertFalse(any("没有具备全部技能的人员" in item for item in errors), errors)
+
+    def test_resource_role_and_priority_are_validated_in_business_snapshot(self) -> None:
+        snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
+        group = next(item for item in snapshot["resource_group_profiles"] if not item.get("virtual_resource"))
+        group["machines"][0]["role"] = "standby"
+        group["machines"][0]["priority"] = "high"
+        errors = validate_snapshot(snapshot)
+        self.assertTrue(any("role 非法" in item for item in errors), errors)
+        self.assertTrue(any("priority 必须是有限数字" in item for item in errors), errors)
+        response = self.client.put(
+            f"/api/master-data/resource_group/{group['resource_group_id']}",
+            json=group,
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("role 非法", response.json()["detail"])
 
     def test_route_cycle_and_external_plan_source_are_rejected(self) -> None:
         snapshot = self.client.get("/api/master-data/snapshot", headers=self.headers).json()
@@ -304,6 +572,10 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertIn("population<1", app_js)
         self.assertIn("generations<0", app_js)
         self.assertIn("仅生成初始排程方案，不执行遗传寻优", app_js)
+        self.assertIn("/summary`", app_js)
+        self.assertIn("function downloadTaskPayload", app_js)
+        self.assertIn("完整大数据通过下载获取", app_js)
+        self.assertNotIn("JSON.stringify(t.request??{},null,2)", app_js)
         for label in (
             "交期优先(EDD)",
             "优先级优先(PRIORITY)",
@@ -312,6 +584,40 @@ class BusinessSystemTests(unittest.TestCase):
             "先到先服务(FCFS)",
         ):
             self.assertIn(label, app_js)
+
+    def test_task_modal_supports_common_weight_presets(self) -> None:
+        app_js = (Path(__file__).parents[1] / "business_app" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        premium = (
+            Path(__file__).parents[1] / "business_app" / "static" / "premium.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("const taskWeightPresets", app_js)
+        for label in ("综合均衡", "交付优先", "设备效率", "负荷均衡"):
+            self.assertIn(f"label:'{label}'", app_js)
+        self.assertIn("values:[0.10,0.30,0.25,0.10,0.10,0.05,0.10]", app_js)
+        self.assertIn("values:[0.20,0.10,0.10,0.30,0.15,0.05,0.10]", app_js)
+        self.assertIn("values:[0.10,0.10,0.10,0.15,0.30,0.20,0.05]", app_js)
+        self.assertIn("title.textContent='方案选择权重'", app_js)
+        self.assertIn("'当前：自定义'", app_js)
+        self.assertIn("function applyTaskWeightPreset", app_js)
+        self.assertIn("replaceAll('TOPSIS 权重','方案选择权重')", app_js)
+        self.assertIn(".weight-preset-button.active", premium)
+
+    def test_task_modal_uses_compact_layout_with_visible_submit_actions(self) -> None:
+        static_dir = Path(__file__).parents[1] / "business_app" / "static"
+        app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+        premium = (static_dir / "premium.css").read_text(encoding="utf-8")
+        self.assertIn("function enableCompactTaskModal", app_js)
+        self.assertIn("classList.add('schedule-task-modal')", app_js)
+        self.assertIn("classList.add('task-json-field')", app_js)
+        self.assertIn("form.classList.toggle('local-mode'", app_js)
+        self.assertIn(".modal-card.schedule-task-modal", premium)
+        self.assertIn("width: min(1320px, 98vw)", premium)
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", premium)
+        self.assertIn(".schedule-task-modal #taskForm > .task-config-section", premium)
+        self.assertIn(".schedule-task-modal #taskForm > .form-actions", premium)
+        self.assertIn("position: sticky", premium)
 
     def test_version_comparison_defaults_to_previous_and_latest_versions(self) -> None:
         app_js = (Path(__file__).parents[1] / "business_app" / "static" / "app.js").read_text(
@@ -334,6 +640,26 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertIn("function renderTasksWithSearch", app_js)
         self.assertIn("function taskTableDetailed", app_js)
         self.assertIn("搜索任务号、创建人、模式、派工规则", app_js)
+        self.assertIn("selectedVersionIds:new Set()", app_js)
+        self.assertIn("function openSelectedVersionComparison", app_js)
+        self.assertIn("function renderMultiVersionMetricComparison", app_js)
+        self.assertIn("/api/versions/compare-metrics", app_js)
+        self.assertIn("已选版本指标对比", app_js)
+
+    def test_task_detail_retry_is_an_interactive_button(self) -> None:
+        app_js = (Path(__file__).parents[1] / "business_app" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('id="retryTaskButton" type="button"', app_js)
+        self.assertIn("retryButton.onclick=()=>retryTask(id,retryButton)", app_js)
+        self.assertIn("button.textContent='正在重试…'", app_js)
+
+    def test_plan_version_kpis_include_tardiness_count(self) -> None:
+        app_js = (Path(__file__).parents[1] / "business_app" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function countMetric", app_js)
+        self.assertIn("['延期订单数',countMetric(tardyCount)]", app_js)
 
     def test_version_types_are_colored_and_master_data_navigation_is_reordered(self) -> None:
         static_dir = Path(__file__).parents[1] / "business_app" / "static"
@@ -362,7 +688,10 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertIn(".feature-strip{gap:30px", styles)
         self.assertIn("SECURE PLANNING CONSOLE", styles)
         self.assertIn("@keyframes login-grid-drift", styles)
-        self.assertIn("/assets/premium.css?v=20260715-1", index)
+        self.assertIn("/assets/comparison.css?v=20260721-4", index)
+        self.assertIn("/assets/premium.css?v=20260721-10", index)
+        self.assertIn("/assets/app.js?v=20260721-10", index)
+        self.assertIn("grid-template-columns: repeat(6, minmax(0, 1fr))", premium)
         self.assertIn(".sidebar", premium)
         self.assertIn(".topbar h2", premium)
         self.assertIn(".data-table", premium)
@@ -413,6 +742,88 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertIn("function switchCalendarType", app_js)
         self.assertIn("data-calendar-type", app_js)
         self.assertIn("defaultCalendarWeeklyShifts", app_js)
+        self.assertIn("function deleteAllMaster", app_js)
+        self.assertIn("一键删除", app_js)
+        self.assertIn("currentMasterDeleteUrl", app_js)
+
+    def test_master_data_batch_delete_respects_current_module_scope(self) -> None:
+        with db() as connection:
+            backup = [dict(row) for row in connection.execute("SELECT * FROM master_records").fetchall()]
+        try:
+            machining_orders = self.client.get(
+                "/api/master-data/order", headers=self.headers
+            ).json()
+            expected_machining = sum(
+                1
+                for row in machining_orders
+                if row["payload"].get("order_business_type") == "MACHINING"
+            )
+            response = self.client.delete(
+                "/api/master-data/order?schedule_type=machining", headers=self.headers
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["deleted"], expected_machining)
+            remaining_orders = self.client.get(
+                "/api/master-data/order", headers=self.headers
+            ).json()
+            self.assertFalse(
+                any(
+                    row["payload"].get("order_business_type") == "MACHINING"
+                    for row in remaining_orders
+                )
+            )
+            self.assertTrue(remaining_orders)
+            self.assertEqual(
+                self.client.delete("/api/master-data/order", headers=self.headers).status_code,
+                422,
+            )
+
+            response = self.client.delete(
+                "/api/master-data/calendar?schedule_type=heat_treatment", headers=self.headers
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["deleted"], 1)
+            remaining_calendars = self.client.get(
+                "/api/master-data/calendar", headers=self.headers
+            ).json()
+            self.assertNotIn(
+                "heat_treatment",
+                {row["payload"].get("schedule_type") for row in remaining_calendars},
+            )
+
+            response = self.client.delete("/api/master-data/machine", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertGreater(response.json()["deleted"], 0)
+            self.assertEqual(
+                self.client.get("/api/master-data/machine", headers=self.headers).json(), []
+            )
+
+            with db() as connection:
+                log = connection.execute(
+                    "SELECT detail_json FROM audit_logs WHERE action=? AND target_type='machine' ORDER BY id DESC LIMIT 1",
+                    ("MASTER_DATA_DELETED",),
+                ).fetchone()
+            self.assertIsNotNone(log)
+            self.assertTrue(json.loads(log["detail_json"])["batch"])
+        finally:
+            with db() as connection:
+                connection.execute("DELETE FROM master_records")
+                connection.executemany(
+                    """INSERT INTO master_records(
+                           entity_type,entity_id,payload_json,revision,updated_by,updated_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    [
+                        (
+                            row["entity_type"],
+                            row["entity_id"],
+                            row["payload_json"],
+                            row["revision"],
+                            row["updated_by"],
+                            row["updated_at"],
+                        )
+                        for row in backup
+                    ],
+                )
 
     def test_version_comparison_returns_core_metric_trends(self) -> None:
         left = {
@@ -486,6 +897,10 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(metrics["makespan"]["trend"], "down")
         self.assertEqual(metrics["makespan"]["outcome"], "improved")
         self.assertEqual(metrics["machine_utilization"]["trend"], "up")
+        self.assertEqual(metrics["tardiness_count"]["before"], 2)
+        self.assertEqual(metrics["tardiness_count"]["after"], 1)
+        self.assertEqual(metrics["tardiness_count"]["delta"], -1)
+        self.assertEqual(metrics["tardiness_count"]["outcome"], "improved")
         self.assertEqual(metrics["on_time_delivery_rate"]["after"], 0.9)
         self.assertEqual(metrics["wip_waiting"]["outcome"], "worsened")
         self.assertEqual(result["score_comparison"]["before"], 0.612483)
@@ -500,6 +915,140 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(result["run_comparison"]["after"]["dispatching_rule"], "PRIORITY")
         self.assertEqual(result["run_comparison"]["before"]["schedule_type"], "heat_treatment")
         self.assertEqual(result["run_comparison"]["after"]["schedule_type"], "assembly")
+
+    def test_multi_version_core_metrics_preserve_order_and_exclude_details(self) -> None:
+        records = [
+            {
+                "version_id": "PLAN-B",
+                "version_no": 2,
+                "schedule_type": "machining",
+                "status": "DRAFT",
+                "created_at": "2026-07-21T09:00:00",
+                "result_json": json.dumps(
+                    {
+                        "metadata": {"order_count": 10},
+                        "kpis": {
+                            "makespan": 540,
+                            "total_tardiness": 60,
+                            "tardiness_count": 1,
+                            "machine_idle_rate": 0.3,
+                            "wip_waiting": 360,
+                        },
+                        "topsis_score": 0.70126,
+                        "schedule": [{"process_id": "P-B"}],
+                    }
+                ),
+            },
+            {
+                "version_id": "PLAN-A",
+                "version_no": 1,
+                "schedule_type": "machining",
+                "status": "DRAFT",
+                "created_at": "2026-07-21T08:00:00",
+                "result_json": json.dumps(
+                    {
+                        "metadata": {"order_count": 10},
+                        "kpis": {
+                            "makespan": 600,
+                            "total_tardiness": 120,
+                            "tardiness_count": 2,
+                            "machine_idle_rate": 0.4,
+                            "wip_waiting": 300,
+                        },
+                        "topsis_score": 0.612483,
+                        "schedule": [{"process_id": "P-A"}],
+                    }
+                ),
+            },
+        ]
+        result = compare_version_core_metrics(records)
+        self.assertEqual([item["version_id"] for item in result["versions"]], ["PLAN-B", "PLAN-A"])
+        self.assertEqual(result["versions"][0]["metrics"]["tardiness_count"], 1)
+        definitions = {item["key"]: item for item in result["metric_definitions"]}
+        self.assertEqual(definitions["comprehensive_score"]["best_version_ids"], ["PLAN-B"])
+        self.assertEqual(definitions["makespan"]["best_version_ids"], ["PLAN-B"])
+        self.assertNotIn("schedule", result["versions"][0])
+        self.assertNotIn("changes", result)
+
+    def test_multi_version_core_metric_endpoint_requires_two_versions(self) -> None:
+        task_ids = ["TEST-MULTI-COMPARE-A", "TEST-MULTI-COMPARE-B"]
+        version_ids = ["PLAN-TEST-MULTI-A", "PLAN-TEST-MULTI-B"]
+        stamp = now_text()
+        try:
+            with db() as connection:
+                for index, (task_id, version_id) in enumerate(zip(task_ids, version_ids), start=1):
+                    connection.execute(
+                        "INSERT INTO schedule_tasks(task_id,schedule_type,mode,dispatching_rule,status,request_json,"
+                        "snapshot_json,response_json,created_by,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            task_id,
+                            "machining",
+                            "static",
+                            "DELIVERY",
+                            "SUCCEEDED",
+                            "{}",
+                            "{}",
+                            "{}",
+                            "admin",
+                            stamp,
+                            stamp,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO schedule_versions(version_id,version_no,task_id,schedule_type,status,result_json,"
+                        "created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            version_id,
+                            9200 + index,
+                            task_id,
+                            "machining",
+                            "DRAFT",
+                            json.dumps(
+                                {
+                                    "metadata": {"order_count": 4},
+                                    "kpis": {
+                                        "makespan": 600 - index * 60,
+                                        "tardiness_count": 3 - index,
+                                    },
+                                    "topsis_score": 0.5 + index / 10,
+                                    "schedule": [{"process_id": f"P-{index}"}],
+                                }
+                            ),
+                            "admin",
+                            stamp,
+                        ),
+                    )
+
+            invalid = self.client.post(
+                "/api/versions/compare-metrics",
+                json={"version_ids": [version_ids[0]]},
+                headers=self.headers,
+            )
+            self.assertEqual(invalid.status_code, 422, invalid.text)
+
+            response = self.client.post(
+                "/api/versions/compare-metrics",
+                json={"version_ids": [version_ids[1], version_ids[0]]},
+                headers=self.headers,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(
+                [item["version_id"] for item in payload["versions"]],
+                [version_ids[1], version_ids[0]],
+            )
+            self.assertTrue(all("schedule" not in item for item in payload["versions"]))
+            self.assertNotIn("changes", payload)
+        finally:
+            with db() as connection:
+                connection.executemany(
+                    "DELETE FROM schedule_versions WHERE version_id=?",
+                    [(version_id,) for version_id in version_ids],
+                )
+                connection.executemany(
+                    "DELETE FROM schedule_tasks WHERE task_id=?",
+                    [(task_id,) for task_id in task_ids],
+                )
 
     def test_admin_can_create_and_update_planner(self) -> None:
         created = self.client.post(
@@ -546,6 +1095,24 @@ class BusinessSystemTests(unittest.TestCase):
         self.assertEqual(exported.status_code, 200)
         self.assertIsInstance(exported.json(), list)
         self.assertTrue(any(item["machine_id"] == "BATCH_MC_01" for item in exported.json()))
+
+    def test_master_data_rejects_invalid_resource_calendar_fields(self) -> None:
+        record = self.client.get("/api/master-data/machine", headers=self.headers).json()[0]["payload"]
+        record["unavailability"] = [
+            {
+                "date_start": "2026-07-12",
+                "segments": [{"start": "8:00", "end": "09:00"}],
+                "status": "UNKNOWN",
+            }
+        ]
+
+        response = self.client.put(
+            f"/api/master-data/machine/{record['machine_id']}",
+            json=record,
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("date_start", response.json()["detail"])
 
         invalid = self.client.post("/api/master-data/machine/batch", json={}, headers=self.headers)
         self.assertEqual(invalid.status_code, 422)
@@ -684,8 +1251,30 @@ class BusinessSystemTests(unittest.TestCase):
             algorithm_client.execute = original_execute
         self.assertEqual(created.status_code, 202)
         task_id = created.json()["task_id"]
-        task = self.client.get(f"/api/tasks/{task_id}", headers=self.headers).json()
+        task_response = self.client.get(f"/api/tasks/{task_id}", headers=self.headers)
+        task = task_response.json()
         self.assertEqual(task["status"], "SUCCEEDED")
+        summary_response = self.client.get(f"/api/tasks/{task_id}/summary", headers=self.headers)
+        self.assertEqual(summary_response.status_code, 200, summary_response.text)
+        self.assertLess(len(summary_response.content), len(task_response.content))
+        summary = summary_response.json()
+        self.assertNotIn("data_snapshot", summary["request"])
+        self.assertGreater(summary["snapshot_summary"]["process_count"], 0)
+        self.assertEqual(summary["response"]["result"]["schedule_count"], 1)
+        self.assertNotIn("schedule", summary["response"]["result"])
+        self.assertTrue(summary["response_available"])
+
+        request_payload = self.client.get(
+            f"/api/tasks/{task_id}/payload/request", headers=self.headers
+        )
+        self.assertEqual(request_payload.status_code, 200, request_payload.text)
+        self.assertIn("attachment", request_payload.headers["content-disposition"])
+        self.assertIn("data_snapshot", request_payload.json())
+        response_payload = self.client.get(
+            f"/api/tasks/{task_id}/payload/response", headers=self.headers
+        )
+        self.assertEqual(response_payload.status_code, 200, response_payload.text)
+        self.assertEqual(response_payload.json()["result"]["schedule"][0]["process_id"], "DEMO_MC_P10")
         task_rows = self.client.get("/api/tasks", headers=self.headers).json()
         task_row = next(item for item in task_rows if item["task_id"] == task_id)
         self.assertEqual(task_row["schedule_type"], "machining")
@@ -712,6 +1301,19 @@ class BusinessSystemTests(unittest.TestCase):
             version_detail["result"]["schedule"][0]["material_ready_time"],
             "2026-07-13T08:00:00",
         )
+        expected_machine_name = next(
+            machine["machine_name"]
+            for machine in request_payload.json()["data_snapshot"]["machine_profiles"]
+            if machine["machine_id"] == "DEMO_MC_01"
+        )
+        self.assertEqual(
+            version_detail["result"]["schedule"][0]["machine_name"],
+            expected_machine_name,
+        )
+        load_context = version_detail["machine_load_context"]
+        self.assertEqual(load_context["period_start"], "2026-07-14T08:00:00")
+        self.assertEqual(load_context["period_end"], "2026-07-14T13:00:00")
+        self.assertGreater(load_context["machines"][0]["available_minutes"], 0)
         self.assertFalse(version_detail["result"]["schedule"][0]["manually_locked"])
         self.assertEqual(version_detail["result"]["schedule"][0]["lock_details"], {})
         self.assertEqual(version_detail["result"]["schedule"][0]["status"], "PENDING")
